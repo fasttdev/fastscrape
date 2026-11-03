@@ -87,19 +87,66 @@
   async function onScrape(e) {
     e.preventDefault();
     setStatus('', '');
+
     const url = els.urlInput.value.trim();
     if (!url) { setStatus('error', 'URL wajib diisi.'); els.urlInput.focus(); return; }
+
     const mode = els.modeSelect.value;
     const customSelector = els.customSelector.value.trim();
-    if (mode === 'custom' && !customSelector) { setStatus('error', 'CSS Selector wajib untuk mode custom.'); els.customSelector.focus(); return; }
+    if (mode === 'custom' && !customSelector) {
+      setStatus('error', 'CSS Selector wajib untuk mode custom.');
+      els.customSelector.focus();
+      return;
+    }
+
     let variableName = els.variableName.value.trim() || 'scrapedData';
-    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) { setStatus('error', 'Nama variabel harus identifier JS valid.'); els.variableName.focus(); return; }
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) {
+      setStatus('error', 'Nama variabel harus identifier JS yang valid.');
+      els.variableName.focus();
+      return;
+    }
     lastVariableName = variableName;
 
     setLoading(true);
     els.resultPanel.hidden = true;
 
     try {
+      // === MODE MIRROR: response HTML, bukan JSON ===
+      if (mode === 'mirror') {
+        const r = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, mode, customSelector, variableName })
+        });
+        if (!r.ok) {
+          const payload = await r.json().catch(() => null);
+          throw new Error(safeMessage(payload && payload.error) || 'Gagal mirror (HTTP ' + r.status + ')');
+        }
+        const html = await r.text();
+        lastResult = { mirrorUrl: URL.createObjectURL(new Blob([html], { type: 'text/html' })) };
+        lastFilename = buildFilename(url, 'mirror').replace(/\.js$/, '.html');
+
+        els.statsRow.innerHTML = '';
+        els.attemptsInfo.hidden = true;
+        els.attemptsInfo.innerHTML = '';
+        els.preview.innerHTML =
+          '<div class="preview-block" style="border-left:4px solid #10b981;">' +
+            '<h3 style="color:#10b981;">✅ Mirror Siap</h3>' +
+            '<div class="preview-item">' + html.length.toLocaleString() + ' bytes HTML. Klik tombol di bawah untuk buka di tab baru.</div>' +
+            '<div class="preview-item" style="background:rgba(239,68,68,0.1);color:#b91c1c;">Catatan: fitur yang manggil API server (login, download, submit form) tetap nggak jalan. Cuma UI + JS client-side yang aktif.</div>' +
+          '</div>';
+
+        els.resultBadge.textContent = 'MIRROR';
+        els.resultBadge.className = 'panel-badge panel-badge-ok';
+        els.downloadBtn.textContent = 'Buka Mirror';
+        els.downloadBtn.disabled = false;
+        els.copyJsonBtn.disabled = true;
+        els.resultPanel.hidden = false;
+        setTimeout(() => els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+        return;
+      }
+
+      // === MODE LAIN: response JSON ===
       const r = await fetch('/api/scrape?format=json', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -111,6 +158,8 @@
         throw new Error(msg);
       }
       lastResult = payload.data;
+      els.downloadBtn.textContent = 'Download .js';
+      els.copyJsonBtn.disabled = false;
       renderResult(lastResult, mode);
     } catch (err) {
       setStatus('error', safeMessage(err));
@@ -121,17 +170,17 @@
 
   function renderResult(payload, mode) {
     const data = payload.result || payload;
-    
+
     lastFilename = buildFilename(data.url || '', mode);
     renderStats(data.stats || {});
     renderAttempts(payload.attempts || data.attempts || []);
-    
+
     let engineInfo = '';
     if (payload.time || payload.engine) {
-       engineInfo = '<div class="preview-block" style="background:rgba(96,165,250,0.1);"><h3>Engine Info</h3><div class="kv">' +
-         '<div class="kv-row"><span>Engine</span><span>' + esc(payload.engine || 'unknown') + '</span></div>' +
-         '<div class="kv-row"><span>Waktu Scrape</span><span>' + esc(payload.time || '-') + '</span></div>' +
-         '</div></div>';
+      engineInfo = '<div class="preview-block" style="background:rgba(96,165,250,0.1);"><h3>Engine Info</h3><div class="kv">' +
+        '<div class="kv-row"><span>Engine</span><span>' + esc(payload.engine || 'unknown') + '</span></div>' +
+        '<div class="kv-row"><span>Waktu Scrape</span><span>' + esc(payload.time || '-') + '</span></div>' +
+        '</div></div>';
     }
 
     els.preview.innerHTML = engineInfo + renderPreviewHTML(data, mode);
@@ -175,7 +224,7 @@
     if (data.rawText && data.rawText.length > 0) {
       parts.push('<div class="preview-block"><h3>Raw Text (' + data.rawText.length + ' karakter)</h3><div class="preview-item" style="max-height:200px;overflow-y:auto;">' + esc(trunc(data.rawText, 1000)) + '</div></div>');
     }
-    
+
     parts.push(renderMetaBlock(data));
     if (data.meta && (data.meta.og || data.meta.twitter)) parts.push(renderSEOMetaBlock(data.meta));
     if (data.structuredData && data.structuredData.length > 0) parts.push(renderStructuredData(data.structuredData));
@@ -188,7 +237,7 @@
     if (mode === 'all' || mode === 'images') parts.push(renderImagesBlock(data.images || []));
     if (mode === 'all' || mode === 'tables') parts.push(renderTablesBlock(data.tables || []));
     if (mode === 'custom') parts.push(renderCustomBlock(data.custom || []));
-    
+
     return parts.filter(Boolean).join('');
   }
 
@@ -216,7 +265,7 @@
     if (meta.keywords) rows.push('<div class="kv-row"><span>Keywords</span><span>' + esc(meta.keywords) + '</span></div>');
     if (meta.author) rows.push('<div class="kv-row"><span>Author</span><span>' + esc(meta.author) + '</span></div>');
     if (meta.generator) rows.push('<div class="kv-row"><span>Generator</span><span>' + esc(meta.generator) + '</span></div>');
-    
+
     if (rows.length === 0) return '';
     return '<div class="preview-block"><h3>SEO &amp; OpenGraph Meta</h3><div class="kv">' + rows.join('') + '</div></div>';
   }
@@ -296,6 +345,13 @@
 
   function onDownload() {
     if (!lastResult) return;
+
+    // Kalau mode mirror, buka URL blob di tab baru
+    if (lastResult.mirrorUrl) {
+      window.open(lastResult.mirrorUrl, '_blank');
+      return;
+    }
+
     const content = buildJsFile(lastResult, lastVariableName, els.modeSelect.value);
     const blob = new Blob([content], { type: 'application/javascript;charset=utf-8' });
     const url = URL.createObjectURL(blob);
