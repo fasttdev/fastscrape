@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#d6dfeb" />
+  <meta name="description" content="FASTSCRAPE - scrape website, simpan hasil sebagai file JavaScript." />
+  <title>FASTSCRAPE</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="bg-blob bg-blob-1"></div>
+  <div class="bg-blob bg-blob-2"></div>
+  <div class="bg-blob bg-blob-3"></div>
+
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">FS</div>
+        <div class="brand-text">
+          <h1>FASTSCRAPE</h1>
+          <p>Scrape website, simpan sebagai .js</p>
+        </div>
+      </div>
+      <div id="proxyStatus" class="pill pill-loading">
+        <span class="pill-dot"></span>
+        <span id="proxyStatusText">Proxy: memuat</span>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <section class="panel glass-clay">
+        <div class="panel-header">
+          <h2>Konfigurasi</h2>
+          <span class="panel-badge">Scraper</span>
+        </div>
+
+        <form id="scrapeForm" class="form" autocomplete="off" novalidate>
+          <label class="field">
+            <span class="field-label">URL Target</span>
+            <input id="urlInput" type="url" inputmode="url" placeholder="https://example.com" required autocapitalize="none" spellcheck="false" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Mode Scrape</span>
+            <div class="select-wrap">
+              <select id="modeSelect">
+                <option value="all">Semua (teks, link, gambar, tabel)</option>
+                <option value="text">Teks (heading &amp; paragraf)</option>
+                <option value="links">Link</option>
+                <option value="images">Gambar</option>
+                <option value="tables">Tabel</option>
+                <option value="custom">Custom CSS Selector</option>
+              </select>
+              <span class="select-caret">▾</span>
+            </div>
+          </label>
+
+          <label class="field" id="customWrap" hidden>
+            <span class="field-label">CSS Selector</span>
+            <input id="customSelector" type="text" placeholder=".article, #main p, a.link" autocapitalize="none" spellcheck="false" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Nama Variabel di File .js</span>
+            <input id="variableName" type="text" value="scrapedData" pattern="[A-Za-z_$][A-Za-z0-9_$]*" autocapitalize="none" spellcheck="false" />
+          </label>
+
+          <button type="submit" class="btn btn-primary" id="submitBtn">
+            <span class="btn-spinner"></span>
+            <span id="submitText">Scrape Sekarang</span>
+          </button>
+
+          <div id="status" class="status" role="alert" hidden></div>
+        </form>
+      </section>
+
+      <section id="resultPanel" class="panel glass-clay" hidden>
+        <div class="panel-header">
+          <h2>Hasil Scrape</h2>
+          <span class="panel-badge panel-badge-ok" id="resultBadge">OK</span>
+        </div>
+        <div id="statsRow" class="stats-row"></div>
+        <div id="attemptsInfo" class="attempts-info" hidden></div>
+        <div id="preview" class="preview"></div>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="downloadBtn">Download .js</button>
+          <button type="button" class="btn btn-secondary" id="copyJsonBtn">Salin JSON</button>
+        </div>
+      </section>
+
+      <footer class="app-footer">
+        <p>Hasil diunduh sebagai file <code>.js</code> siap pakai.</p>
+      </footer>
+    </main>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
