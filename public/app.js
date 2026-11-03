@@ -25,6 +25,7 @@
   let lastResult = null;
   let lastVariableName = 'scrapedData';
   let lastFilename = 'scrape.js';
+  let lastMode = 'all';
 
   function esc(s) {
     if (s === null || s === undefined) return '';
@@ -35,6 +36,13 @@
     if (!s) return '';
     s = String(s);
     return s.length <= n ? s : s.slice(0, n - 1) + '…';
+  }
+
+  function formatBytes(b) {
+    if (!b || b < 0) return '0 B';
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / (1024 * 1024)).toFixed(2) + ' MB';
   }
 
   function safeMessage(input) {
@@ -79,9 +87,9 @@
   }
 
   function onModeChange() {
-    const isCustom = els.modeSelect.value === 'custom';
-    els.customWrap.hidden = !isCustom;
-    if (isCustom) setTimeout(() => els.customSelector.focus(), 50);
+    const v = els.modeSelect.value;
+    els.customWrap.hidden = v !== 'custom';
+    if (v === 'custom') setTimeout(() => els.customSelector.focus(), 50);
   }
 
   async function onScrape(e) {
@@ -106,12 +114,12 @@
       return;
     }
     lastVariableName = variableName;
+    lastMode = mode;
 
     setLoading(true);
     els.resultPanel.hidden = true;
 
     try {
-      // === MODE MIRROR: response HTML, bukan JSON ===
       if (mode === 'mirror') {
         const r = await fetch('/api/scrape', {
           method: 'POST',
@@ -133,7 +141,7 @@
           '<div class="preview-block" style="border-left:4px solid #10b981;">' +
             '<h3 style="color:#10b981;">✅ Mirror Siap</h3>' +
             '<div class="preview-item">' + html.length.toLocaleString() + ' bytes HTML. Klik tombol di bawah untuk buka di tab baru.</div>' +
-            '<div class="preview-item" style="background:rgba(239,68,68,0.1);color:#b91c1c;">Catatan: fitur yang manggil API server (login, download, submit form) tetap nggak jalan. Cuma UI + JS client-side yang aktif.</div>' +
+            '<div class="preview-item" style="background:rgba(239,68,68,0.1);color:#b91c1c;">Fitur yang manggil API server (login, download, submit form) tetap nggak jalan. Cuma UI + JS client-side yang aktif.</div>' +
           '</div>';
 
         els.resultBadge.textContent = 'MIRROR';
@@ -146,7 +154,6 @@
         return;
       }
 
-      // === MODE LAIN: response JSON ===
       const r = await fetch('/api/scrape?format=json', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -172,7 +179,7 @@
     const data = payload.result || payload;
 
     lastFilename = buildFilename(data.url || '', mode);
-    renderStats(data.stats || {});
+    renderStats(mode === 'scripts' ? (data.stats || {}) : (data.stats || {}));
     renderAttempts(payload.attempts || data.attempts || []);
 
     let engineInfo = '';
@@ -183,9 +190,13 @@
         '</div></div>';
     }
 
-    els.preview.innerHTML = engineInfo + renderPreviewHTML(data, mode);
+    if (mode === 'scripts') {
+      els.preview.innerHTML = engineInfo + renderScriptsPreview(data);
+    } else {
+      els.preview.innerHTML = engineInfo + renderPreviewHTML(data, mode);
+    }
 
-    els.resultBadge.textContent = 'OK';
+    els.resultBadge.textContent = mode === 'scripts' ? 'SCRIPTS' : 'OK';
     els.resultBadge.className = 'panel-badge panel-badge-ok';
     els.downloadBtn.disabled = false;
     els.copyJsonBtn.disabled = false;
@@ -216,6 +227,51 @@
     els.attemptsInfo.innerHTML = '<div class="preview-block"><h3>Percobaan</h3>' + rows + '</div>';
   }
 
+  // === PREVIEW UNTUK MODE SCRIPTS ===
+  function renderScriptsPreview(data) {
+    if (!data || !data.scripts || !data.scripts.length) {
+      return '<div class="preview-block"><h3>Scripts</h3><div class="preview-more">Tidak ada tag &lt;script&gt; ditemukan.</div></div>';
+    }
+
+    let html = '<div class="preview-block"><h3>Ringkasan Scripts</h3><div class="kv">' +
+      '<div class="kv-row"><span>Total</span><span>' + data.totalScripts + '</span></div>' +
+      '<div class="kv-row"><span>Inline</span><span>' + data.inlineCount + '</span></div>' +
+      '<div class="kv-row"><span>Eksternal</span><span>' + data.externalCount + '</span></div>' +
+      '<div class="kv-row"><span>Gagal Fetch</span><span>' + data.failedCount + '</span></div>' +
+      '<div class="kv-row"><span>Di-skip</span><span>' + (data.skippedCount || 0) + '</span></div>' +
+      '</div></div>';
+
+    html += '<div class="preview-block"><h3>Daftar Scripts</h3><div class="preview-list">';
+
+    data.scripts.forEach((s, i) => {
+      const badge = s.type === 'inline' ? 'INLINE' : 'EXT';
+      const statusIcon = s.error ? '❌' : (s.skipped ? '⏭️' : '✅');
+      const sizeText = s.size ? formatBytes(s.size) : '-';
+      let item = '<div class="preview-item">';
+      item += '<div style="margin-bottom:4px;"><span class="preview-label">#' + (i + 1) + ' ' + badge + '</span> ' + statusIcon + ' ' + sizeText + '</div>';
+      if (s.src) {
+        item += '<div style="font-size:11px;color:var(--gray-600);word-break:break-all;margin-bottom:4px;">' + esc(s.src) + '</div>';
+      }
+      if (s.error) {
+        item += '<div style="color:#b91c1c;font-size:11px;font-weight:600;">Error: ' + esc(safeMessage(s.error)) + '</div>';
+      } else if (s.skipped) {
+        item += '<div style="color:#f59e0b;font-size:11px;font-weight:600;">' + esc(s.reason || 'Di-skip') + '</div>';
+      } else if (s.code) {
+        const snippet = s.code.substring(0, 200).replace(/\n/g, ' ');
+        item += '<div style="font-family:monospace;font-size:10px;color:var(--gray-700);background:rgba(0,0,0,0.04);padding:6px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(snippet) + '</div>';
+      }
+      item += '</div>';
+      html += item;
+    });
+
+    html += '</div></div>';
+    html += '<div class="preview-block" style="background:rgba(96,165,250,0.1);"><h3>ℹ️ Info</h3>' +
+      '<div class="preview-item" style="font-size:12px;">Klik <b>Download .js</b> untuk mengunduh bundle berisi kode semua script. Bundle berisi array string — lu bisa iterasi dan simpan per-file: <code>scripts.forEach((s, i) => fs.writeFileSync("js_" + i + ".js", s.code))</code></div>' +
+      '</div>';
+
+    return html;
+  }
+
   function renderPreviewHTML(data, mode) {
     const parts = [];
     if (data._warning) {
@@ -224,7 +280,6 @@
     if (data.rawText && data.rawText.length > 0) {
       parts.push('<div class="preview-block"><h3>Raw Text (' + data.rawText.length + ' karakter)</h3><div class="preview-item" style="max-height:200px;overflow-y:auto;">' + esc(trunc(data.rawText, 1000)) + '</div></div>');
     }
-
     parts.push(renderMetaBlock(data));
     if (data.meta && (data.meta.og || data.meta.twitter)) parts.push(renderSEOMetaBlock(data.meta));
     if (data.structuredData && data.structuredData.length > 0) parts.push(renderStructuredData(data.structuredData));
@@ -265,7 +320,6 @@
     if (meta.keywords) rows.push('<div class="kv-row"><span>Keywords</span><span>' + esc(meta.keywords) + '</span></div>');
     if (meta.author) rows.push('<div class="kv-row"><span>Author</span><span>' + esc(meta.author) + '</span></div>');
     if (meta.generator) rows.push('<div class="kv-row"><span>Generator</span><span>' + esc(meta.generator) + '</span></div>');
-
     if (rows.length === 0) return '';
     return '<div class="preview-block"><h3>SEO &amp; OpenGraph Meta</h3><div class="kv">' + rows.join('') + '</div></div>';
   }
@@ -346,13 +400,12 @@
   function onDownload() {
     if (!lastResult) return;
 
-    // Kalau mode mirror, buka URL blob di tab baru
     if (lastResult.mirrorUrl) {
       window.open(lastResult.mirrorUrl, '_blank');
       return;
     }
 
-    const content = buildJsFile(lastResult, lastVariableName, els.modeSelect.value);
+    const content = buildJsFile(lastResult, lastVariableName, lastMode);
     const blob = new Blob([content], { type: 'application/javascript;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
