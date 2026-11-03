@@ -55,7 +55,6 @@ const HARDCODED_PROXIES = `
 198.46.161.42:5092:rrwxlwav:w14oaultk4at
 `.trim();
 
-// 2. URL VALIDATOR
 const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
 const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
 const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
@@ -76,28 +75,22 @@ function validateUrl(input) {
   return { valid: true, url: parsed.toString() };
 }
 
-// 3. PROXY POOL
 const PROXY_FAIL_THRESHOLD = 3;
 const PROXY_COOLDOWN_MS = 60000;
 class ProxyPool {
   constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
   _load() {
-    const raw = HARDCODED_PROXIES || '';
-    for (const line of raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
-      const p = this._parse(line);
-      if (p) { this.proxies.push(p); this.state.set(p.key, { failures: 0, cooldownUntil: 0 }); }
+    for (const line of HARDCODED_PROXIES.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+      const parts = line.split(':');
+      if (parts.length !== 4) continue;
+      const [host, port, user, pass] = parts;
+      const portNum = Number(port);
+      if (!host || !portNum || !user || !pass) continue;
+      const key = `${host}:${portNum}:${user}`;
+      this.proxies.push({ key, host, port: portNum, user, pass, url: `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${portNum}` });
+      this.state.set(key, { failures: 0, cooldownUntil: 0 });
     }
   }
-  _parse(line) {
-    const parts = line.split(':');
-    if (parts.length !== 4) return null;
-    const [host, port, user, pass] = parts;
-    if (!host || !port || !user || !pass) return null;
-    const portNum = Number(port);
-    if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) return null;
-    return { key: `${host}:${port}:${user}`, host, port: portNum, user, pass, url: `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}` };
-  }
-  get size() { return this.proxies.length; }
   next() {
     if (!this.proxies.length) return null;
     const now = Date.now();
@@ -124,7 +117,6 @@ class ProxyPool {
 let _pool = null;
 function getProxyPool() { if (!_pool) _pool = new ProxyPool(); return _pool; }
 
-// 4. RATE LIMIT
 const RL_WINDOW = 60000;
 const RL_MAX = 30;
 const _rlBuckets = new Map();
@@ -139,7 +131,6 @@ function rateLimit(req) {
   return { allowed: b.count <= RL_MAX, remaining: Math.max(0, RL_MAX - b.count), resetAt: b.start + RL_WINDOW };
 }
 
-// 5. SCRAPER
 const FETCH_TIMEOUT = 6000;
 const JS_TIMEOUT = 3000;
 const MAX_ATTEMPTS = 2;
@@ -151,7 +142,7 @@ const UAS = [
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 ];
 function buildHeaders() {
-  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Cache-Control': 'no-cache' };
+  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Cache-Control': 'no-cache' };
 }
 function safeErrMessage(err) {
   if (!err) return 'UNKNOWN';
@@ -208,7 +199,6 @@ async function fetchWithProxyRotation(url) {
   throw e;
 }
 
-// 6. PARSER
 const norm = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
 const abs = (base, raw) => { if (!raw) return ''; try { return new URL(raw, base).toString(); } catch { return raw; } };
 
@@ -248,49 +238,28 @@ function parseHtml(html, baseUrl, mode, customSelector) {
 
   data.structuredData = [];
   $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const parsed = JSON.parse($(el).html());
-      data.structuredData.push(parsed);
-    } catch (_) {}
+    try { data.structuredData.push(JSON.parse($(el).html())); } catch (_) {}
   });
 
   if (mode === 'all' || mode === 'text') {
     const headings = [];
-    for (let lv = 1; lv <= 6; lv++) {
-      $('h' + lv).each((_, el) => {
-        const t = norm($(el).text());
-        if (t) headings.push({ level: lv, text: t });
-      });
-    }
+    for (let lv = 1; lv <= 6; lv++) $('h' + lv).each((_, el) => { const t = norm($(el).text()); if (t) headings.push({ level: lv, text: t }); });
     data.headings = headings;
-
     const paragraphs = [];
-    $('p').each((_, el) => {
-      const t = norm($(el).text());
-      if (t.length >= 3) paragraphs.push(t);
-    });
-
+    $('p').each((_, el) => { const t = norm($(el).text()); if (t.length >= 3) paragraphs.push(t); });
     if (paragraphs.length === 0) {
       const fallback = [];
       $('article, main, section, div').each((_, el) => {
-        const $el = $(el);
-        const clone = $el.clone();
-        clone.children().remove();
+        const clone = $(el).clone(); clone.children().remove();
         const t = norm(clone.text());
         if (t.length >= 30) fallback.push(t);
       });
       if (fallback.length > 0) { data.paragraphs = fallback; data._fallback = 'div-article'; }
-      else { data.paragraphs = []; }
-    } else {
-      data.paragraphs = paragraphs;
-    }
-
+      else data.paragraphs = [];
+    } else data.paragraphs = paragraphs;
     const bodyText = norm($('body').text());
     if (bodyText) data.rawText = bodyText.slice(0, 5000);
-
-    if (!data.title && bodyText.length < 200) {
-      data._warning = 'Situs ini kemungkinan SPA (JavaScript-rendered). Konten asli tidak ada di HTML mentah.';
-    }
+    if (!data.title && bodyText.length < 200) data._warning = 'Situs ini kemungkinan SPA (JavaScript-rendered). Konten asli tidak ada di HTML mentah.';
   }
 
   if (mode === 'all' || mode === 'links') {
@@ -352,34 +321,64 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     tables: data.tables?.length || 0,
     custom: data.custom?.length || 0
   };
-
   return data;
 }
 
-// 7. MIRROR MODE
+// ==================== MIRROR MODE (UPGRADED: AUTO-PROXY API) ====================
 async function scrapeMirror(url) {
   const f = await fetchWithProxyRotation(url);
   let html = f.html;
+
   html = html.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
   html = html.replace(/<meta[^>]+http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
+
   const finalUrl = f.finalUrl || url;
+  const targetOrigin = new URL(finalUrl).origin;
+
+  const interceptor = `<script>(function(){
+var PROXY='/api/proxy';
+var TARGET_ORIGIN=${JSON.stringify(targetOrigin)};
+var BASE_URL=${JSON.stringify(finalUrl)};
+function resolveUrl(raw){try{return new URL(raw,BASE_URL).toString();}catch(e){return raw;}}
+function sameOrigin(u){try{return new URL(u).origin===TARGET_ORIGIN;}catch(e){return false;}}
+function headersToObj(h){var o={};try{new Headers(h||{}).forEach(function(v,k){var lk=k.toLowerCase();if(lk==='host'||lk==='content-length'||lk==='connection')return;o[k]=v;});}catch(e){}return o;}
+function toResponse(data){var h=new Headers();Object.keys(data.headers||{}).forEach(function(k){try{h.set(k,data.headers[k]);}catch(e){}});var body=data.body;if(data.isBase64){var bin=atob(body);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);body=bytes;}return new Response(body,{status:data.status,statusText:data.statusText||'',headers:h});}
+async function proxyRequest(targetUrl,method,headers,body){var res=await _fetch.call(window,PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:targetUrl,method:method,headers:headers,body:body})});var data=await res.json();if(!data.ok)throw new Error(data.error||'proxy fail');return toResponse(data);}
+var _fetch=window.fetch;
+window.fetch=function(input,init){
+init=init||{};
+var isReq=(typeof input==='object'&&input&&input.url);
+var rawUrl=isReq?input.url:String(input);
+var fullUrl=resolveUrl(rawUrl);
+if(!sameOrigin(fullUrl))return _fetch.apply(this,arguments);
+var method=isReq?(input.method||'GET'):(init.method||'GET');
+var headers=isReq?headersToObj(input.headers):headersToObj(init.headers);
+var bodyPromise;
+if(isReq&&method!=='GET'&&method!=='HEAD')bodyPromise=input.text();
+else if(init.body!=null)bodyPromise=Promise.resolve(typeof init.body==='string'?init.body:String(init.body));
+else bodyPromise=Promise.resolve(null);
+return bodyPromise.then(function(b){return proxyRequest(fullUrl,method,headers,b);});
+};
+})();</script>`;
+
   const baseTag = `<base href="${finalUrl}">`;
+
   if (/<head[^>]*>/i.test(html)) {
-    html = html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`);
+    html = html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}${interceptor}`);
   } else {
-    html = baseTag + html;
+    html = baseTag + interceptor + html;
   }
+
   return { html, proxyUsed: f.proxyUsed, status: f.status, finalUrl, attempts: f.attempts };
 }
 
-// 8. SCRIPTS MODE — EKSTRAK JS
+// ==================== SCRIPTS MODE ====================
 async function scrapeScripts(targetUrl) {
   const pageFetch = await fetchWithProxyRotation(targetUrl);
   const html = pageFetch.html;
   const baseUrl = pageFetch.finalUrl || targetUrl;
   const $ = cheerio.load(html);
   const pool = getProxyPool();
-
   const scriptElements = $('script').toArray();
   const results = new Array(scriptElements.length);
   const externalTasks = [];
@@ -393,58 +392,28 @@ async function scrapeScripts(targetUrl) {
 
     if (src) {
       if (externalCount >= MAX_EXTERNAL_SCRIPTS) {
-        results[i] = {
-          index: i,
-          type: 'external',
-          src: abs(baseUrl, src),
-          mimeType: type,
-          skipped: true,
-          reason: 'Melebihi batas ' + MAX_EXTERNAL_SCRIPTS + ' script eksternal'
-        };
+        results[i] = { index: i, type: 'external', src: abs(baseUrl, src), mimeType: type, skipped: true, reason: 'Melebihi batas ' + MAX_EXTERNAL_SCRIPTS };
         continue;
       }
       externalCount++;
       const absSrc = abs(baseUrl, src);
-
       externalTasks.push(
         fetchOnce(absSrc, pool.size > 0 ? pool.next() : null, JS_TIMEOUT)
           .then(f => {
             const code = f.html || '';
-            results[i] = {
-              index: i,
-              type: 'external',
-              src: absSrc,
-              mimeType: type,
-              size: code.length,
-              code: code.length > MAX_JS_SIZE ? code.slice(0, MAX_JS_SIZE) + '\n/* TRUNCATED (melebihi ' + MAX_JS_SIZE + ' byte) */' : code
-            };
+            results[i] = { index: i, type: 'external', src: absSrc, mimeType: type, size: code.length, code: code.length > MAX_JS_SIZE ? code.slice(0, MAX_JS_SIZE) + '\n/* TRUNCATED */' : code };
           })
-          .catch(err => {
-            results[i] = {
-              index: i,
-              type: 'external',
-              src: absSrc,
-              mimeType: type,
-              error: safeErrMessage(err)
-            };
-          })
+          .catch(err => { results[i] = { index: i, type: 'external', src: absSrc, mimeType: type, error: safeErrMessage(err) }; })
       );
     } else {
       const code = $el.html() || '';
       if (code.trim().length > 0) {
-        results[i] = {
-          index: i,
-          type: 'inline',
-          mimeType: type,
-          size: code.length,
-          code: code.length > MAX_JS_SIZE ? code.slice(0, MAX_JS_SIZE) + '\n/* TRUNCATED */' : code
-        };
+        results[i] = { index: i, type: 'inline', mimeType: type, size: code.length, code: code.length > MAX_JS_SIZE ? code.slice(0, MAX_JS_SIZE) + '\n/* TRUNCATED */' : code };
       }
     }
   }
 
   await Promise.allSettled(externalTasks);
-
   const scripts = results.filter(Boolean);
 
   return {
@@ -461,7 +430,7 @@ async function scrapeScripts(targetUrl) {
   };
 }
 
-// 9. EXPORTER & HANDLER
+// ==================== EXPORTER & HANDLER ====================
 function buildJsFile(payload, options) {
   const name = options.variableName && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(options.variableName) ? options.variableName : 'scrapedData';
   const header = `// Generated by FASTSCRAPE\n// Source URL: ${payload.result?.url || ''}\n// Scraped at: ${new Date().toISOString()}\n\n`;
@@ -509,7 +478,6 @@ module.exports = async function handler(req, res) {
   const v = validateUrl(url);
   if (!v.valid) return sendJson(res, 400, { ok: false, error: v.reason });
 
-  // === MODE MIRROR ===
   if (mode === 'mirror') {
     const startTime = Date.now();
     try {
@@ -525,21 +493,13 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // === MODE SCRIPTS ===
   if (mode === 'scripts') {
     const startTime = Date.now();
     try {
       const data = await scrapeScripts(v.url);
-      const finalPayload = {
-        creator: 'FortechDev',
-        engine: 'fastscrape-js-extractor',
-        time: `${Date.now() - startTime}ms`,
-        status: true,
-        result: data
-      };
+      const finalPayload = { creator: 'FortechDev', engine: 'fastscrape-js-extractor', time: `${Date.now() - startTime}ms`, status: true, result: data };
       const wantsJson = req.query?.format === 'json' || req.headers.accept?.includes('application/json');
       if (wantsJson) return sendJson(res, 200, { ok: true, data: finalPayload });
-
       const js = buildJsFile(finalPayload, { mode, variableName });
       const fn = buildFilename(v.url, 'scripts');
       res.status(200);
@@ -547,36 +507,17 @@ module.exports = async function handler(req, res) {
       res.setHeader('Content-Disposition', `attachment; filename="${fn}"`);
       return res.end(js);
     } catch (err) {
-      return sendJson(res, 502, {
-        creator: 'FortechDev',
-        time: `${Date.now() - startTime}ms`,
-        status: false,
-        error: normalizeError(err),
-        code: normalizeError(err.code || 'SCRIPTS_FAILED'),
-        attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : []
-      });
+      return sendJson(res, 502, { creator: 'FortechDev', time: `${Date.now() - startTime}ms`, status: false, error: normalizeError(err), code: normalizeError(err.code || 'SCRIPTS_FAILED'), attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : [] });
     }
   }
 
-  // === MODE LAIN ===
   const startTime = Date.now();
   try {
     const f = await fetchWithProxyRotation(v.url);
     const parsed = parseHtml(f.html, f.finalUrl || v.url, mode, customSelector);
-
-    const finalPayload = {
-      creator: 'FortechDev',
-      engine: 'fastscrape-axios',
-      time: `${Date.now() - startTime}ms`,
-      status: true,
-      proxyUsed: f.proxyUsed,
-      attempts: f.attempts,
-      result: parsed
-    };
-
+    const finalPayload = { creator: 'FortechDev', engine: 'fastscrape-axios', time: `${Date.now() - startTime}ms`, status: true, proxyUsed: f.proxyUsed, attempts: f.attempts, result: parsed };
     const wantsJson = req.query?.format === 'json' || req.headers.accept?.includes('application/json');
     if (wantsJson) return sendJson(res, 200, { ok: true, data: finalPayload });
-
     const js = buildJsFile(finalPayload, { mode, variableName });
     const fn = buildFilename(v.url, mode);
     res.status(200);
@@ -584,13 +525,6 @@ module.exports = async function handler(req, res) {
     res.setHeader('Content-Disposition', `attachment; filename="${fn}"`);
     return res.end(js);
   } catch (err) {
-    return sendJson(res, 502, {
-      creator: 'FortechDev',
-      time: `${Date.now() - startTime}ms`,
-      status: false,
-      error: normalizeError(err),
-      code: normalizeError(err.code || 'SCRAPE_FAILED'),
-      attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : []
-    });
+    return sendJson(res, 502, { creator: 'FortechDev', time: `${Date.now() - startTime}ms`, status: false, error: normalizeError(err), code: normalizeError(err.code || 'SCRAPE_FAILED'), attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : [] });
   }
 };
