@@ -57,13 +57,11 @@ const HARDCODED_PROXIES = `
 const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
 const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
 const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
-
 function isPrivateIp(host) {
   const h = host.replace(/^\[|\]$/g, '');
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h) && !h.includes(':')) return false;
   return PRIVATE_IP_REGEX.some(rx => rx.test(h));
 }
-
 function validateUrl(input) {
   if (!input || typeof input !== 'string') return { valid: false, reason: 'URL kosong' };
   let parsed;
@@ -76,8 +74,12 @@ function validateUrl(input) {
   return { valid: true, url: parsed.toString() };
 }
 
+// Proxy pool + sticky session
 const PROXY_FAIL_THRESHOLD = 3;
 const PROXY_COOLDOWN_MS = 60000;
+const SESSION_TTL_MS = 5 * 60 * 1000;
+const _sessionProxy = new Map(); // sessionId -> { proxyKey, proxyUrl, expiresAt }
+
 class ProxyPool {
   constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
   _load() {
@@ -106,6 +108,7 @@ class ProxyPool {
     this.cursor = (this.cursor + 1) % this.proxies.length;
     return this.proxies[this.cursor];
   }
+  getByKey(key) { return this.proxies.find(p => p.key === key) || null; }
   markSuccess(p) { if (!p) return; const st = this.state.get(p.key); if (st) { st.failures = 0; st.cooldownUntil = 0; } }
   markFailure(p) {
     if (!p) return;
@@ -117,6 +120,26 @@ class ProxyPool {
 }
 let _pool = null;
 function getPool() { if (!_pool) _pool = new ProxyPool(); return _pool; }
+
+function getSessionProxy(sessionId) {
+  const pool = getPool();
+  if (!sessionId) return pool.next();
+  const now = Date.now();
+  const existing = _sessionProxy.get(sessionId);
+  if (existing && existing.expiresAt > now) {
+    const p = pool.getByKey(existing.proxyKey);
+    if (p) return p;
+  }
+  const p = pool.next();
+  if (p) {
+    _sessionProxy.set(sessionId, { proxyKey: p.key, proxyUrl: p.url, expiresAt: now + SESSION_TTL_MS });
+  }
+  // Cleanup expired
+  if (_sessionProxy.size > 500) {
+    for (const [k, v] of _sessionProxy) if (v.expiresAt <= now) _sessionProxy.delete(k);
+  }
+  return p;
+}
 
 function sendJson(res, status, body) {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -141,21 +164,23 @@ module.exports = async function handler(req, res) {
   let body;
   try { body = JSON.parse(raw || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'Body bukan JSON valid' }); }
 
-  const { url, method = 'GET', headers = {}, body: reqBody = null } = body || {};
+  const { url, method = 'GET', headers = {}, body: reqBody = null, sessionId = null } = body || {};
   const v = validateUrl(url);
   if (!v.valid) return sendJson(res, 400, { ok: false, error: v.reason });
 
   const cleanHeaders = {};
   Object.keys(headers).forEach(k => {
     const lk = k.toLowerCase();
-    if (['host', 'content-length', 'connection', 'content-encoding', 'accept-encoding', 'origin', 'referer'].includes(lk)) return;
+    if (['host', 'content-length', 'connection', 'content-encoding', 'accept-encoding'].includes(lk)) return;
     cleanHeaders[k] = headers[k];
   });
+  // Forward cookies from the browser request to our proxy endpoint
+  if (req.headers.cookie) cleanHeaders['Cookie'] = req.headers.cookie;
   cleanHeaders['Accept-Encoding'] = 'gzip, deflate, br';
   cleanHeaders['User-Agent'] = cleanHeaders['User-Agent'] || cleanHeaders['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-  const pool = getPool();
-  const proxy = pool.next();
+  // Sticky proxy per session
+  const proxy = getSessionProxy(sessionId);
 
   const cfg = {
     method: method.toUpperCase(),
@@ -177,20 +202,16 @@ module.exports = async function handler(req, res) {
 
   try {
     const r = await axios(cfg);
-    if (proxy && r.status >= 200 && r.status < 400) pool.markSuccess(proxy);
-    else if (proxy) pool.markFailure(proxy);
+    if (proxy && r.status >= 200 && r.status < 400) getPool().markSuccess(proxy);
+    else if (proxy) getPool().markFailure(proxy);
 
     const contentType = String(r.headers['content-type'] || '').toLowerCase();
     const isText = /json|text|xml|javascript|html|x-www-form-urlencoded/.test(contentType);
     const buf = Buffer.from(r.data);
 
     let responseBody, isBase64 = false;
-    if (isText) {
-      responseBody = buf.toString('utf8');
-    } else {
-      responseBody = buf.toString('base64');
-      isBase64 = true;
-    }
+    if (isText) responseBody = buf.toString('utf8');
+    else { responseBody = buf.toString('base64'); isBase64 = true; }
 
     const outHeaders = {};
     Object.keys(r.headers).forEach(k => {
@@ -198,6 +219,18 @@ module.exports = async function handler(req, res) {
       if (['content-length', 'transfer-encoding', 'connection', 'content-encoding', 'content-security-policy'].includes(lk)) return;
       outHeaders[k] = r.headers[k];
     });
+
+    // Pass Set-Cookie headers back to the browser (as our domain's cookies)
+    const setCookie = r.headers['set-cookie'];
+    if (setCookie) {
+      // Rewrite domain to our own so browser stores them, remove Secure in dev if needed
+      const rewritten = (Array.isArray(setCookie) ? setCookie : [setCookie]).map(c => {
+        return c
+          .replace(/;\s*Domain=[^;]+/gi, '')
+          .replace(/;\s*Secure/gi, '');
+      });
+      res.setHeader('Set-Cookie', rewritten);
+    }
 
     return sendJson(res, 200, {
       ok: true,
@@ -209,7 +242,7 @@ module.exports = async function handler(req, res) {
       proxyUsed: proxy ? `${proxy.host}:${proxy.port}` : null
     });
   } catch (err) {
-    if (proxy) pool.markFailure(proxy);
+    if (proxy) getPool().markFailure(proxy);
     return sendJson(res, 502, {
       ok: false,
       error: err.message || 'Proxy request gagal',
