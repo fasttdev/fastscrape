@@ -1,6 +1,16 @@
 (function () {
   'use strict';
 
+  // ============================================================
+  // KONFIGURASI CORS PROXY (fallback berurutan)
+  // Kalau satu mati, coba yang berikutnya.
+  // ============================================================
+  const CORS_PROXIES = [
+    { name: 'allorigins',  build: u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) },
+    { name: 'corsproxy',   build: u => 'https://corsproxy.io/?' + encodeURIComponent(u) },
+    { name: 'thingproxy',  build: u => 'https://thingproxy.freeboard.io/fetch/' + u }
+  ];
+
   const els = {
     form: document.getElementById('scrapeForm'),
     urlInput: document.getElementById('urlInput'),
@@ -18,17 +28,24 @@
     preview: document.getElementById('preview'),
     downloadBtn: document.getElementById('downloadBtn'),
     copyJsonBtn: document.getElementById('copyJsonBtn'),
-    proxyStatus: document.getElementById('proxyStatus'),
-    proxyStatusText: document.getElementById('proxyStatusText')
+    netStatus: document.getElementById('netStatus'),
+    netStatusText: document.getElementById('netStatusText')
   };
 
   let lastResult = null;
   let lastVariableName = 'scrapedData';
   let lastFilename = 'scrape.js';
 
+  // ---------- utils ----------
+
   function esc(s) {
     if (s === null || s === undefined) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function trunc(s, n) {
@@ -37,50 +54,246 @@
     return s.length <= n ? s : s.slice(0, n - 1) + '…';
   }
 
-  // --- FIX: selalu ubah apa pun jadi string yang aman ---
+  function norm(s) {
+    return typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
+  }
+
+  function abs(base, raw) {
+    if (!raw) return '';
+    try { return new URL(raw, base).toString(); } catch { return raw; }
+  }
+
   function safeMessage(input) {
     if (input === null || input === undefined) return 'Terjadi kesalahan.';
     if (typeof input === 'string') return input;
-    if (typeof input === 'number' || typeof input === 'boolean') return String(input);
     if (input instanceof Error) return input.message || 'Terjadi kesalahan.';
     if (typeof input === 'object') {
       if (typeof input.message === 'string') return input.message;
       if (typeof input.error === 'string') return input.error;
-      if (typeof input.reason === 'string') return input.reason;
       try { return JSON.stringify(input); } catch { return 'Terjadi kesalahan.'; }
     }
     return String(input);
   }
-  // --- END FIX ---
 
-  function setProxyStatus(kind, text) {
-    els.proxyStatus.className = 'pill pill-' + kind;
-    els.proxyStatusText.textContent = text;
+  // ---------- status UI ----------
+
+  function setNetStatus(kind, text) {
+    els.netStatus.className = 'pill pill-' + kind;
+    els.netStatusText.textContent = text;
   }
 
   function setStatus(kind, msg) {
-    if (!msg) { els.status.hidden = true; els.status.textContent = ''; els.status.className = 'status'; return; }
+    if (!msg) {
+      els.status.hidden = true;
+      els.status.textContent = '';
+      els.status.className = 'status';
+      return;
+    }
     els.status.hidden = false;
     els.status.className = 'status status-' + kind;
-    els.status.textContent = safeMessage(msg); // paksa string
+    els.status.textContent = safeMessage(msg);
   }
 
   function setLoading(on) {
     els.submitBtn.disabled = on;
     els.submitBtn.classList.toggle('is-loading', on);
     els.submitText.textContent = on ? 'Scraping...' : 'Scrape Sekarang';
-    if (on) { els.downloadBtn.disabled = true; els.copyJsonBtn.disabled = true; }
+    if (on) {
+      els.downloadBtn.disabled = true;
+      els.copyJsonBtn.disabled = true;
+    }
   }
 
-  async function checkHealth() {
-    try {
-      const r = await fetch('/api/health', { cache: 'no-store' });
-      if (!r.ok) throw new Error();
-      const d = await r.json();
-      const n = d.proxiesLoaded || 0;
-      setProxyStatus(n === 0 ? 'warn' : 'ok', 'Proxy: ' + n);
-    } catch { setProxyStatus('error', 'Server offline'); }
+  // ---------- CORS proxy fetch ----------
+
+  async function fetchWithFallback(targetUrl) {
+    const attempts = [];
+    for (const p of CORS_PROXIES) {
+      const t0 = Date.now();
+      const proxied = p.build(targetUrl);
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const res = await fetch(proxied, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: { 'Accept': 'text/html,*/*' }
+        });
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const html = await res.text();
+        if (!html || html.length < 30) throw new Error('Respons kosong');
+        attempts.push({ proxy: p.name, ok: true, durationMs: Date.now() - t0 });
+        return { html, proxyUsed: p.name, attempts };
+      } catch (err) {
+        attempts.push({
+          proxy: p.name,
+          ok: false,
+          durationMs: Date.now() - t0,
+          error: safeMessage(err.name === 'AbortError' ? 'timeout' : err)
+        });
+      }
+    }
+    const e = new Error('Semua CORS proxy gagal. Situs mungkin memblokir atau proxy sedang down.');
+    e.attempts = attempts;
+    throw e;
   }
+
+  // ---------- parser ----------
+
+  function parseHtml(html, baseUrl, mode, customSelector) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    const title = norm(doc.title) ||
+      norm(doc.querySelector('meta[property="og:title"]')?.getAttribute('content')) || '';
+
+    const description =
+      norm(doc.querySelector('meta[name="description"]')?.getAttribute('content')) ||
+      norm(doc.querySelector('meta[property="og:description"]')?.getAttribute('content')) || '';
+
+    const data = {
+      url: baseUrl,
+      scrapedAt: new Date().toISOString(),
+      title,
+      description
+    };
+
+    if (mode === 'all' || mode === 'text') {
+      const headings = [];
+      for (let lv = 1; lv <= 6; lv++) {
+        doc.querySelectorAll('h' + lv).forEach(el => {
+          const t = norm(el.textContent);
+          if (t) headings.push({ level: lv, text: t });
+        });
+      }
+      data.headings = headings;
+
+      const paragraphs = [];
+      doc.querySelectorAll('p').forEach(el => {
+        const t = norm(el.textContent);
+        if (t.length >= 3) paragraphs.push(t);
+      });
+      data.paragraphs = paragraphs;
+    }
+
+    if (mode === 'all' || mode === 'links') {
+      const seen = new Set();
+      const links = [];
+      doc.querySelectorAll('a[href]').forEach(el => {
+        const url = abs(baseUrl, el.getAttribute('href'));
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        links.push({
+          url,
+          text: norm(el.textContent),
+          rel: norm(el.getAttribute('rel') || ''),
+          target: norm(el.getAttribute('target') || '')
+        });
+      });
+      data.links = links;
+    }
+
+    if (mode === 'all' || mode === 'images') {
+      const seen = new Set();
+      const images = [];
+      doc.querySelectorAll('img').forEach(el => {
+        const raw = el.getAttribute('src') || el.getAttribute('data-src') || '';
+        const url = abs(baseUrl, raw);
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        images.push({
+          url,
+          alt: norm(el.getAttribute('alt') || ''),
+          width: el.getAttribute('width') || null,
+          height: el.getAttribute('height') || null
+        });
+      });
+      data.images = images;
+    }
+
+    if (mode === 'all' || mode === 'tables') {
+      const tables = [];
+      doc.querySelectorAll('table').forEach((tableEl, idx) => {
+        const caption = norm(tableEl.querySelector('caption')?.textContent || '');
+        const headers = [];
+        tableEl.querySelectorAll('thead tr').forEach((tr, i) => {
+          if (i > 0) return;
+          tr.querySelectorAll('th, td').forEach(th => headers.push(norm(th.textContent)));
+        });
+        if (headers.length === 0) {
+          const firstRow = tableEl.querySelector('tr');
+          if (firstRow) {
+            let hasTh = false;
+            firstRow.querySelectorAll('th').forEach(th => {
+              hasTh = true;
+              headers.push(norm(th.textContent));
+            });
+            if (!hasTh) {
+              firstRow.querySelectorAll('td').forEach(td => headers.push(norm(td.textContent)));
+            }
+          }
+        }
+        const rows = [];
+        tableEl.querySelectorAll('tbody tr').forEach(tr => {
+          const cells = [];
+          tr.querySelectorAll('td, th').forEach(c => cells.push(norm(c.textContent)));
+          if (cells.length) rows.push(cells);
+        });
+        if (rows.length === 0) {
+          tableEl.querySelectorAll('tr').forEach((tr, ri) => {
+            if (ri === 0) return;
+            const cells = [];
+            tr.querySelectorAll('td, th').forEach(c => cells.push(norm(c.textContent)));
+            if (cells.length) rows.push(cells);
+          });
+        }
+        if (headers.length || rows.length) {
+          tables.push({ index: idx, caption, headers, rows });
+        }
+      });
+      data.tables = tables;
+    }
+
+    if (mode === 'custom') {
+      data.customSelector = customSelector;
+      const results = [];
+      const seen = new Set();
+      let selected = [];
+      try {
+        selected = Array.from(doc.querySelectorAll(customSelector));
+      } catch (err) {
+        throw new Error('CSS Selector tidak valid: ' + err.message);
+      }
+      selected.forEach(el => {
+        const item = {
+          tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
+          text: norm(el.textContent),
+          html: el.innerHTML ? el.innerHTML.trim().slice(0, 2000) : '',
+          href: abs(baseUrl, el.getAttribute('href') || ''),
+          src: abs(baseUrl, el.getAttribute('src') || '')
+        };
+        const k = item.tag + '|' + item.text.slice(0, 80) + '|' + item.href + '|' + item.src;
+        if (seen.has(k)) return;
+        seen.add(k);
+        results.push(item);
+      });
+      data.custom = results;
+    }
+
+    data.stats = {
+      headings: data.headings?.length || 0,
+      paragraphs: data.paragraphs?.length || 0,
+      links: data.links?.length || 0,
+      images: data.images?.length || 0,
+      tables: data.tables?.length || 0,
+      custom: data.custom?.length || 0
+    };
+
+    return data;
+  }
+
+  // ---------- actions ----------
 
   function onModeChange() {
     const isCustom = els.modeSelect.value === 'custom';
@@ -91,35 +304,45 @@
   async function onScrape(e) {
     e.preventDefault();
     setStatus('', '');
+
     const url = els.urlInput.value.trim();
     if (!url) { setStatus('error', 'URL wajib diisi.'); els.urlInput.focus(); return; }
+
+    let parsed;
+    try { parsed = new URL(url); } catch { setStatus('error', 'Format URL tidak valid.'); els.urlInput.focus(); return; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      setStatus('error', 'Hanya http/https yang diizinkan.'); return;
+    }
+
     const mode = els.modeSelect.value;
     const customSelector = els.customSelector.value.trim();
-    if (mode === 'custom' && !customSelector) { setStatus('error', 'CSS Selector wajib untuk mode custom.'); els.customSelector.focus(); return; }
+    if (mode === 'custom' && !customSelector) {
+      setStatus('error', 'CSS Selector wajib untuk mode custom.'); els.customSelector.focus(); return;
+    }
+
     let variableName = els.variableName.value.trim() || 'scrapedData';
-    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) { setStatus('error', 'Nama variabel harus identifier JS valid.'); els.variableName.focus(); return; }
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) {
+      setStatus('error', 'Nama variabel harus identifier JS valid.'); els.variableName.focus(); return;
+    }
     lastVariableName = variableName;
 
     setLoading(true);
     els.resultPanel.hidden = true;
+    setNetStatus('loading', 'Scraping...');
 
     try {
-      const r = await fetch('/api/scrape?format=json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ url, mode, customSelector, variableName })
-      });
-      const payload = await r.json().catch(() => null);
-      if (!r.ok || !payload || !payload.ok) {
-        // --- FIX: jangan lempar objek mentah ---
-        const msg = safeMessage(payload && payload.error) || ('Gagal scrape (HTTP ' + r.status + ')');
-        throw new Error(msg);
-      }
-      lastResult = payload.data;
-      renderResult(lastResult, mode);
+      const fetched = await fetchWithFallback(url);
+      const data = parseHtml(fetched.html, url, mode, customSelector);
+      data.proxyUsed = fetched.proxyUsed;
+      data.attempts = fetched.attempts;
+
+      lastResult = data;
+      renderResult(data, mode);
+      setNetStatus('ok', 'OK: ' + fetched.proxyUsed);
     } catch (err) {
-      // --- FIX: pastikan err yang dilempar bukan objek mentah ---
       setStatus('error', safeMessage(err));
+      setNetStatus('error', 'Gagal');
+      if (err.attempts) renderAttempts(err.attempts);
     } finally {
       setLoading(false);
     }
@@ -130,20 +353,35 @@
     renderStats(data.stats || {});
     renderAttempts(data.attempts || []);
     renderPreview(data, mode);
+
     els.resultBadge.textContent = 'OK';
     els.resultBadge.className = 'panel-badge panel-badge-ok';
     els.downloadBtn.disabled = false;
     els.copyJsonBtn.disabled = false;
     els.resultPanel.hidden = false;
-    setTimeout(() => els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+
+    setTimeout(() => {
+      els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
   }
 
   function renderStats(s) {
-    const items = [['Heading', s.headings], ['Paragraf', s.paragraphs], ['Link', s.links], ['Gambar', s.images], ['Tabel', s.tables], ['Custom', s.custom]]
-      .filter(p => typeof p[1] === 'number' && p[1] > 0);
+    const items = [
+      ['Heading', s.headings],
+      ['Paragraf', s.paragraphs],
+      ['Link', s.links],
+      ['Gambar', s.images],
+      ['Tabel', s.tables],
+      ['Custom', s.custom]
+    ].filter(p => typeof p[1] === 'number' && p[1] > 0);
+
     if (!items.length) { els.statsRow.innerHTML = ''; return; }
+
     els.statsRow.innerHTML = items.map(p =>
-      '<div class="stat-chip"><span class="stat-value">' + p[1] + '</span><span class="stat-label">' + esc(p[0]) + '</span></div>'
+      '<div class="stat-chip">' +
+        '<span class="stat-value">' + p[1] + '</span>' +
+        '<span class="stat-label">' + esc(p[0]) + '</span>' +
+      '</div>'
     ).join('');
   }
 
@@ -163,7 +401,10 @@
 
   function renderPreview(data, mode) {
     const parts = [renderMetaBlock(data)];
-    if (mode === 'all' || mode === 'text') { parts.push(renderHeadingsBlock(data.headings || [])); parts.push(renderParagraphsBlock(data.paragraphs || [])); }
+    if (mode === 'all' || mode === 'text') {
+      parts.push(renderHeadingsBlock(data.headings || []));
+      parts.push(renderParagraphsBlock(data.paragraphs || []));
+    }
     if (mode === 'all' || mode === 'links') parts.push(renderLinksBlock(data.links || []));
     if (mode === 'all' || mode === 'images') parts.push(renderImagesBlock(data.images || []));
     if (mode === 'all' || mode === 'tables') parts.push(renderTablesBlock(data.tables || []));
@@ -172,7 +413,13 @@
   }
 
   function renderMetaBlock(d) {
-    const rows = [['URL', d.url], ['Final URL', d.finalUrl], ['Title', d.title], ['Description', d.description], ['HTTP', d.httpStatus], ['Proxy', d.proxyUsed || 'direct'], ['Waktu', d.scrapedAt]];
+    const rows = [
+      ['URL', d.url],
+      ['Title', d.title],
+      ['Description', d.description],
+      ['Proxy', d.proxyUsed || '-'],
+      ['Waktu', d.scrapedAt]
+    ];
     return '<div class="preview-block"><h3>Meta</h3><div class="kv">' +
       rows.map(r => '<div class="kv-row"><span>' + esc(r[0]) + '</span><span>' + esc(r[1] || '-') + '</span></div>').join('') +
       '</div></div>';
@@ -268,7 +515,8 @@
     } catch {
       const ta = document.createElement('textarea');
       ta.value = txt; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); setStatus('success', 'JSON disalin.'); } catch { setStatus('error', 'Gagal menyalin.'); }
+      try { document.execCommand('copy'); setStatus('success', 'JSON disalin.'); }
+      catch { setStatus('error', 'Gagal menyalin.'); }
       document.body.removeChild(ta);
       setTimeout(() => setStatus('', ''), 2500);
     }
@@ -278,6 +526,7 @@
   els.modeSelect.addEventListener('change', onModeChange);
   els.downloadBtn.addEventListener('click', onDownload);
   els.copyJsonBtn.addEventListener('click', onCopy);
+
   onModeChange();
-  checkHealth();
+  setNetStatus('ok', 'Static mode');
 })();
