@@ -1,0 +1,11 @@
+{
+  "name": "fastscrape",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": ">=18.0.0" },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "https-proxy-agent": "^7.0.5"
+  }
+}
