@@ -2,6 +2,9 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
+// ============================================================
+// 1. PROXY HARDCODED (50 buah)
+// ============================================================
 const HARDCODED_PROXIES = `
 45.38.107.97:6014:fbfecafr:8xvxfyeqey9u
 64.137.96.74:6641:fbfecafr:8xvxfyeqey9u
@@ -55,14 +58,19 @@ const HARDCODED_PROXIES = `
 198.46.161.42:5092:rrwxlwav:w14oaultk4at
 `.trim();
 
+// ============================================================
+// 2. URL VALIDATOR
+// ============================================================
 const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
 const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
 const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
+
 function isPrivateIp(host) {
   const h = host.replace(/^\[|\]$/g, '');
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h) && !h.includes(':')) return false;
   return PRIVATE_IP_REGEX.some(rx => rx.test(h));
 }
+
 function validateUrl(input) {
   if (!input || typeof input !== 'string') return { valid: false, reason: 'URL kosong' };
   let parsed;
@@ -75,8 +83,12 @@ function validateUrl(input) {
   return { valid: true, url: parsed.toString() };
 }
 
+// ============================================================
+// 3. PROXY POOL
+// ============================================================
 const PROXY_FAIL_THRESHOLD = 3;
 const PROXY_COOLDOWN_MS = 60000;
+
 class ProxyPool {
   constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
   _load() {
@@ -117,6 +129,9 @@ class ProxyPool {
 let _pool = null;
 function getProxyPool() { if (!_pool) _pool = new ProxyPool(); return _pool; }
 
+// ============================================================
+// 4. RATE LIMIT
+// ============================================================
 const RL_WINDOW = 60000;
 const RL_MAX = 30;
 const _rlBuckets = new Map();
@@ -131,11 +146,15 @@ function rateLimit(req) {
   return { allowed: b.count <= RL_MAX, remaining: Math.max(0, RL_MAX - b.count), resetAt: b.start + RL_WINDOW };
 }
 
+// ============================================================
+// 5. SCRAPER CORE
+// ============================================================
 const FETCH_TIMEOUT = 6000;
 const JS_TIMEOUT = 3000;
 const MAX_ATTEMPTS = 2;
 const MAX_EXTERNAL_SCRIPTS = 15;
 const MAX_JS_SIZE = 300000;
+
 const UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -165,6 +184,7 @@ function normalizeFetchErr(err) {
   if (code === 'ENOTFOUND') return { code: 'DNS', message: 'Domain tidak ditemukan' };
   return { code, message: safeErrMessage(err) };
 }
+
 async function fetchOnce(url, proxy, timeout) {
   const cfg = { timeout, maxRedirects: 5, responseType: 'text', validateStatus: s => s >= 200 && s < 400, headers: buildHeaders() };
   if (proxy) {
@@ -174,6 +194,7 @@ async function fetchOnce(url, proxy, timeout) {
   const res = await axios.get(url, cfg);
   return { html: typeof res.data === 'string' ? res.data : String(res.data), status: res.status, finalUrl: res.request?.res?.responseUrl || url };
 }
+
 async function fetchWithProxyRotation(url) {
   const pool = getProxyPool();
   const attempts = [];
@@ -199,6 +220,9 @@ async function fetchWithProxyRotation(url) {
   throw e;
 }
 
+// ============================================================
+// 6. PARSER (HTML to JSON)
+// ============================================================
 const norm = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
 const abs = (base, raw) => { if (!raw) return ''; try { return new URL(raw, base).toString(); } catch { return raw; } };
 
@@ -324,7 +348,9 @@ function parseHtml(html, baseUrl, mode, customSelector) {
   return data;
 }
 
-// ==================== MIRROR MODE (UPGRADED: AUTO-PROXY API) ====================
+// ============================================================
+// 7. MIRROR MODE (INTERCEPTOR FETCH & XHR)
+// ============================================================
 async function scrapeMirror(url) {
   const f = await fetchWithProxyRotation(url);
   let html = f.html;
@@ -334,30 +360,69 @@ async function scrapeMirror(url) {
 
   const finalUrl = f.finalUrl || url;
   const targetOrigin = new URL(finalUrl).origin;
+  
+  // Generate unique session ID so this mirror tab's API calls route through the same proxy IP
+  const sessionId = 'm_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   const interceptor = `<script>(function(){
 var PROXY='/api/proxy';
+var SESSION=${JSON.stringify(sessionId)};
 var TARGET_ORIGIN=${JSON.stringify(targetOrigin)};
 var BASE_URL=${JSON.stringify(finalUrl)};
+var _fetch=window.fetch;
+var _XHR=window.XMLHttpRequest;
 function resolveUrl(raw){try{return new URL(raw,BASE_URL).toString();}catch(e){return raw;}}
 function sameOrigin(u){try{return new URL(u).origin===TARGET_ORIGIN;}catch(e){return false;}}
 function headersToObj(h){var o={};try{new Headers(h||{}).forEach(function(v,k){var lk=k.toLowerCase();if(lk==='host'||lk==='content-length'||lk==='connection')return;o[k]=v;});}catch(e){}return o;}
 function toResponse(data){var h=new Headers();Object.keys(data.headers||{}).forEach(function(k){try{h.set(k,data.headers[k]);}catch(e){}});var body=data.body;if(data.isBase64){var bin=atob(body);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);body=bytes;}return new Response(body,{status:data.status,statusText:data.statusText||'',headers:h});}
-async function proxyRequest(targetUrl,method,headers,body){var res=await _fetch.call(window,PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:targetUrl,method:method,headers:headers,body:body})});var data=await res.json();if(!data.ok)throw new Error(data.error||'proxy fail');return toResponse(data);}
-var _fetch=window.fetch;
+async function proxyRequest(targetUrl,method,headers,body){
+  var res=await _fetch.call(window,PROXY,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:targetUrl,method:method,headers:headers,body:body,sessionId:SESSION})});
+  var data=await res.json();if(!data.ok)throw new Error(data.error||'proxy fail');return toResponse(data);
+}
 window.fetch=function(input,init){
-init=init||{};
-var isReq=(typeof input==='object'&&input&&input.url);
-var rawUrl=isReq?input.url:String(input);
-var fullUrl=resolveUrl(rawUrl);
-if(!sameOrigin(fullUrl))return _fetch.apply(this,arguments);
-var method=isReq?(input.method||'GET'):(init.method||'GET');
-var headers=isReq?headersToObj(input.headers):headersToObj(init.headers);
-var bodyPromise;
-if(isReq&&method!=='GET'&&method!=='HEAD')bodyPromise=input.text();
-else if(init.body!=null)bodyPromise=Promise.resolve(typeof init.body==='string'?init.body:String(init.body));
-else bodyPromise=Promise.resolve(null);
-return bodyPromise.then(function(b){return proxyRequest(fullUrl,method,headers,b);});
+  init=init||{};
+  var isReq=(typeof input==='object'&&input&&input.url);
+  var rawUrl=isReq?input.url:String(input);
+  var fullUrl=resolveUrl(rawUrl);
+  if(!sameOrigin(fullUrl))return _fetch.apply(this,arguments);
+  var method=isReq?(input.method||'GET'):(init.method||'GET');
+  var headers=isReq?headersToObj(input.headers):headersToObj(init.headers);
+  var bodyPromise;
+  if(isReq&&method!=='GET'&&method!=='HEAD')bodyPromise=input.text();
+  else if(init.body!=null){
+    if(typeof init.body==='string')bodyPromise=Promise.resolve(init.body);
+    else if(init.body instanceof FormData){var fd=init.body;var usp=new URLSearchParams();fd.forEach(function(v,k){usp.append(k,v);});headers['Content-Type']='application/x-www-form-urlencoded';bodyPromise=Promise.resolve(usp.toString());}
+    else if(init.body instanceof URLSearchParams)bodyPromise=Promise.resolve(init.body.toString());
+    else bodyPromise=Promise.resolve(String(init.body));
+  } else bodyPromise=Promise.resolve(null);
+  return bodyPromise.then(function(b){return proxyRequest(fullUrl,method,headers,b);});
+};
+// Patch XHR for older script submissions
+var _xhrOpen=_XHR.prototype.open;
+var _xhrSend=_XHR.prototype.send;
+_XHR.prototype.open=function(m,u){this.__m=m;this.__u=resolveUrl(u);return _xhrOpen.apply(this,arguments);};
+_XHR.prototype.send=function(b){
+  var self=this;
+  if(!sameOrigin(this.__u))return _xhrSend.apply(this,arguments);
+  var hdrs={};try{var raw=this.getAllResponseHeaders();}catch(e){}
+  var method=this.__m||'GET';
+  var bodyPromise=(b!=null)?Promise.resolve(typeof b==='string'?b:String(b)):Promise.resolve(null);
+  bodyPromise.then(function(body){
+    proxyRequest(self.__u,method,hdrs,body).then(function(resp){
+      return resp.text().then(function(txt){
+        Object.defineProperty(self,'readyState',{value:4,configurable:true});
+        Object.defineProperty(self,'status',{value:resp.status,configurable:true});
+        Object.defineProperty(self,'responseText',{value:txt,configurable:true});
+        Object.defineProperty(self,'response',{value:txt,configurable:true});
+        if(self.onreadystatechange)self.onreadystatechange();
+        if(self.onload)self.onload();
+      });
+    }).catch(function(err){
+      Object.defineProperty(self,'readyState',{value:4,configurable:true});
+      Object.defineProperty(self,'status',{value:502,configurable:true});
+      if(self.onerror)self.onerror(err);
+    });
+  });
 };
 })();</script>`;
 
@@ -372,13 +437,16 @@ return bodyPromise.then(function(b){return proxyRequest(fullUrl,method,headers,b
   return { html, proxyUsed: f.proxyUsed, status: f.status, finalUrl, attempts: f.attempts };
 }
 
-// ==================== SCRIPTS MODE ====================
+// ============================================================
+// 8. SCRIPTS MODE (EKSTRAK JS)
+// ============================================================
 async function scrapeScripts(targetUrl) {
   const pageFetch = await fetchWithProxyRotation(targetUrl);
   const html = pageFetch.html;
   const baseUrl = pageFetch.finalUrl || targetUrl;
   const $ = cheerio.load(html);
   const pool = getProxyPool();
+
   const scriptElements = $('script').toArray();
   const results = new Array(scriptElements.length);
   const externalTasks = [];
@@ -430,7 +498,9 @@ async function scrapeScripts(targetUrl) {
   };
 }
 
-// ==================== EXPORTER & HANDLER ====================
+// ============================================================
+// 9. EXPORTER & HANDLER
+// ============================================================
 function buildJsFile(payload, options) {
   const name = options.variableName && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(options.variableName) ? options.variableName : 'scrapedData';
   const header = `// Generated by FASTSCRAPE\n// Source URL: ${payload.result?.url || ''}\n// Scraped at: ${new Date().toISOString()}\n\n`;
