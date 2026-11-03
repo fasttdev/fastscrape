@@ -140,17 +140,16 @@ function rateLimit(req) {
   return { allowed: b.count <= RL_MAX, remaining: Math.max(0, RL_MAX - b.count), resetAt: b.start + RL_WINDOW };
 }
 
-// 5. SCRAPER (AXIOS)
+// 5. SCRAPER
 const FETCH_TIMEOUT = 6000;
 const MAX_ATTEMPTS = 2;
 const UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 ];
 function buildHeaders() {
-  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Accept-Encoding': 'gzip, deflate, br', 'Cache-Control': 'no-cache' };
+  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Cache-Control': 'no-cache' };
 }
 function safeErrMessage(err) {
   if (!err) return 'UNKNOWN';
@@ -207,20 +206,74 @@ async function fetchWithProxyRotation(url) {
   throw e;
 }
 
-// 6. PARSER
+// 6. PARSER (DIUPGRADE)
 const norm = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
 const abs = (base, raw) => { if (!raw) return ''; try { return new URL(raw, base).toString(); } catch { return raw; } };
+
 function parseHtml(html, baseUrl, mode, customSelector) {
   const $ = cheerio.load(html);
-  const data = { url: baseUrl, scrapedAt: new Date().toISOString(), title: norm($('title').first().text()) || norm($('meta[property="og:title"]').attr('content')) || '', description: norm($('meta[name="description"]').attr('content')) || norm($('meta[property="og:description"]').attr('content')) || '' };
+  
+  // Buang elemen yang bukan konten
+  $('script, style, noscript, nav, footer, header, aside, .ad, .ads, .advertisement').remove();
+  
+  const data = {
+    url: baseUrl,
+    scrapedAt: new Date().toISOString(),
+    title: norm($('title').first().text()) || norm($('meta[property="og:title"]').attr('content')) || '',
+    description: norm($('meta[name="description"]').attr('content')) || norm($('meta[property="og:description"]').attr('content')) || ''
+  };
+
   if (mode === 'all' || mode === 'text') {
+    // Heading
     const headings = [];
-    for (let lv = 1; lv <= 6; lv++) $('h'+lv).each((_, el) => { const t = norm($(el).text()); if (t) headings.push({ level: lv, text: t }); });
+    for (let lv = 1; lv <= 6; lv++) {
+      $('h' + lv).each((_, el) => {
+        const t = norm($(el).text());
+        if (t) headings.push({ level: lv, text: t });
+      });
+    }
     data.headings = headings;
-    const ps = [];
-    $('p').each((_, el) => { const t = norm($(el).text()); if (t.length >= 3) ps.push(t); });
-    data.paragraphs = ps;
+    
+    // Paragraf
+    const paragraphs = [];
+    $('p').each((_, el) => {
+      const t = norm($(el).text());
+      if (t.length >= 3) paragraphs.push(t);
+    });
+    
+    // FALLBACK: kalau nggak ada <p>, ambil dari <div>/<article>/<section>
+    if (paragraphs.length === 0) {
+      const fallback = [];
+      $('article, main, section, div').each((_, el) => {
+        const $el = $(el);
+        // Ambil text langsung (bukan dari child)
+        const clone = $el.clone();
+        clone.children().remove();
+        const t = norm(clone.text());
+        if (t.length >= 30) fallback.push(t);
+      });
+      if (fallback.length > 0) {
+        data.paragraphs = fallback;
+        data._fallback = 'div-article';
+      } else {
+        data.paragraphs = [];
+      }
+    } else {
+      data.paragraphs = paragraphs;
+    }
+    
+    // RAW TEXT: semua text di body
+    const bodyText = norm($('body').text());
+    if (bodyText) {
+      data.rawText = bodyText.slice(0, 20000);
+    }
+    
+    // SPA DETECTION
+    if (!data.title && bodyText.length < 200) {
+      data._warning = 'Situs ini kemungkinan SPA (JavaScript-rendered). Konten asli tidak ada di HTML mentah.';
+    }
   }
+
   if (mode === 'all' || mode === 'links') {
     const seen = new Set(); const links = [];
     $('a[href]').each((_, el) => {
@@ -231,6 +284,7 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.links = links;
   }
+
   if (mode === 'all' || mode === 'images') {
     const seen = new Set(); const imgs = [];
     $('img').each((_, el) => {
@@ -242,6 +296,7 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.images = imgs;
   }
+
   if (mode === 'all' || mode === 'tables') {
     const tables = [];
     $('table').each((idx, tEl) => {
@@ -261,12 +316,19 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.tables = tables;
   }
+
   if (mode === 'custom') {
     data.customSelector = customSelector;
     const results = []; const seen = new Set();
     $(customSelector).each((_, el) => {
       const $el = $(el);
-      const item = { tag: el.tagName ? el.tagName.toLowerCase() : 'unknown', text: norm($el.text()), html: $el.html() ? $el.html().trim().slice(0, 2000) : '', href: abs(baseUrl, $el.attr('href') || ''), src: abs(baseUrl, $el.attr('src') || '') };
+      const item = {
+        tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
+        text: norm($el.text()),
+        html: $el.html() ? $el.html().trim().slice(0, 2000) : '',
+        href: abs(baseUrl, $el.attr('href') || ''),
+        src: abs(baseUrl, $el.attr('src') || '')
+      };
       const k = `${item.tag}|${item.text.slice(0,80)}|${item.href}|${item.src}`;
       if (seen.has(k)) return;
       seen.add(k);
@@ -274,7 +336,15 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.custom = results;
   }
-  data.stats = { headings: data.headings?.length || 0, paragraphs: data.paragraphs?.length || 0, links: data.links?.length || 0, images: data.images?.length || 0, tables: data.tables?.length || 0, custom: data.custom?.length || 0 };
+
+  data.stats = {
+    headings: data.headings?.length || 0,
+    paragraphs: data.paragraphs?.length || 0,
+    links: data.links?.length || 0,
+    images: data.images?.length || 0,
+    tables: data.tables?.length || 0,
+    custom: data.custom?.length || 0
+  };
   return data;
 }
 
