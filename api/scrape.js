@@ -1,411 +1,376 @@
-const axios = require('axios');
-const cheerio = require('cheerio');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+(function () {
+  'use strict';
 
-// 1. PROXY HARDCODED
-const HARDCODED_PROXIES = `
-45.38.107.97:6014:fbfecafr:8xvxfyeqey9u
-64.137.96.74:6641:fbfecafr:8xvxfyeqey9u
-198.23.243.226:6361:fbfecafr:8xvxfyeqey9u
-38.154.185.97:6370:fbfecafr:8xvxfyeqey9u
-84.247.60.125:6095:fbfecafr:8xvxfyeqey9u
-191.96.254.138:6185:fbfecafr:8xvxfyeqey9u
-198.46.161.42:5092:fbfecafr:8xvxfyeqey9u
-64.137.10.153:5803:fbfecafr:8xvxfyeqey9u
-104.164.49.38:7693:fbfecafr:8xvxfyeqey9u
-23.26.71.145:5628:fbfecafr:8xvxfyeqey9u
-45.38.107.97:6014:nptkhpqp:h54farfbhtyz
-64.137.96.74:6641:nptkhpqp:h54farfbhtyz
-198.23.243.226:6361:nptkhpqp:h54farfbhtyz
-38.154.185.97:6370:nptkhpqp:h54farfbhtyz
-84.247.60.125:6095:nptkhpqp:h54farfbhtyz
-191.96.254.138:6185:nptkhpqp:h54farfbhtyz
-198.46.161.42:5092:nptkhpqp:h54farfbhtyz
-64.137.10.153:5803:nptkhpqp:h54farfbhtyz
-104.164.49.38:7693:nptkhpqp:h54farfbhtyz
-23.26.71.145:5628:nptkhpqp:h54farfbhtyz
-31.59.20.176:6754:giuhhvxn:d8fcfdf30xom
-45.38.107.97:6014:giuhhvxn:d8fcfdf30xom
-64.137.96.74:6641:giuhhvxn:d8fcfdf30xom
-198.23.243.226:6361:giuhhvxn:d8fcfdf30xom
-38.154.185.97:6370:giuhhvxn:d8fcfdf30xom
-84.247.60.125:6095:giuhhvxn:d8fcfdf30xom
-142.111.67.146:5611:giuhhvxn:d8fcfdf30xom
-191.96.254.138:6185:giuhhvxn:d8fcfdf30xom
-31.58.9.4:6077:giuhhvxn:d8fcfdf30xom
-198.46.161.42:5092:giuhhvxn:d8fcfdf30xom
-31.59.20.176:6754:yuvwfvvf:jzonez82ark8
-45.38.107.97:6014:yuvwfvvf:jzonez82ark8
-64.137.96.74:6641:yuvwfvvf:jzonez82ark8
-198.23.243.226:6361:yuvwfvvf:jzonez82ark8
-38.154.185.97:6370:yuvwfvvf:jzonez82ark8
-84.247.60.125:6095:yuvwfvvf:jzonez82ark8
-142.111.67.146:5611:yuvwfvvf:jzonez82ark8
-191.96.254.138:6185:yuvwfvvf:jzonez82ark8
-31.58.9.4:6077:yuvwfvvf:jzonez82ark8
-198.46.161.42:5092:yuvwfvvf:jzonez82ark8
-31.59.20.176:6754:rrwxlwav:w14oaultk4at
-45.38.107.97:6014:rrwxlwav:w14oaultk4at
-64.137.96.74:6641:rrwxlwav:w14oaultk4at
-198.23.243.226:6361:rrwxlwav:w14oaultk4at
-38.154.185.97:6370:rrwxlwav:w14oaultk4at
-84.247.60.125:6095:rrwxlwav:w14oaultk4at
-142.111.67.146:5611:rrwxlwav:w14oaultk4at
-191.96.254.138:6185:rrwxlwav:w14oaultk4at
-31.58.9.4:6077:rrwxlwav:w14oaultk4at
-198.46.161.42:5092:rrwxlwav:w14oaultk4at
-`.trim();
+  const els = {
+    form: document.getElementById('scrapeForm'),
+    urlInput: document.getElementById('urlInput'),
+    modeSelect: document.getElementById('modeSelect'),
+    customWrap: document.getElementById('customWrap'),
+    customSelector: document.getElementById('customSelector'),
+    variableName: document.getElementById('variableName'),
+    submitBtn: document.getElementById('submitBtn'),
+    submitText: document.getElementById('submitText'),
+    status: document.getElementById('status'),
+    resultPanel: document.getElementById('resultPanel'),
+    resultBadge: document.getElementById('resultBadge'),
+    statsRow: document.getElementById('statsRow'),
+    attemptsInfo: document.getElementById('attemptsInfo'),
+    preview: document.getElementById('preview'),
+    downloadBtn: document.getElementById('downloadBtn'),
+    copyJsonBtn: document.getElementById('copyJsonBtn'),
+    proxyStatus: document.getElementById('proxyStatus'),
+    proxyStatusText: document.getElementById('proxyStatusText')
+  };
 
-// 2. URL VALIDATOR
-const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
-const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
-const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
-function isPrivateIp(host) {
-  const h = host.replace(/^\[|\]$/g, '');
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h) && !h.includes(':')) return false;
-  return PRIVATE_IP_REGEX.some(rx => rx.test(h));
-}
-function validateUrl(input) {
-  if (!input || typeof input !== 'string') return { valid: false, reason: 'URL kosong' };
-  let parsed;
-  try { parsed = new URL(input.trim()); } catch { return { valid: false, reason: 'Format URL tidak valid' }; }
-  if (BLOCKED_PROTOCOLS.has(parsed.protocol)) return { valid: false, reason: 'Protokol tidak diizinkan' };
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { valid: false, reason: 'Hanya http/https' };
-  const host = parsed.hostname.toLowerCase();
-  if (BLOCKED_HOSTS.has(host)) return { valid: false, reason: 'Host tidak diizinkan' };
-  if (isPrivateIp(host)) return { valid: false, reason: 'IP privat tidak diizinkan' };
-  return { valid: true, url: parsed.toString() };
-}
+  let lastResult = null;
+  let lastVariableName = 'scrapedData';
+  let lastFilename = 'scrape.js';
 
-// 3. PROXY POOL
-const PROXY_FAIL_THRESHOLD = 3;
-const PROXY_COOLDOWN_MS = 60000;
-class ProxyPool {
-  constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
-  _load() {
-    const raw = HARDCODED_PROXIES || '';
-    for (const line of raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
-      const p = this._parse(line);
-      if (p) { this.proxies.push(p); this.state.set(p.key, { failures: 0, cooldownUntil: 0 }); }
+  // ---------- utils ----------
+
+  function esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function trunc(s, n) {
+    if (!s) return '';
+    s = String(s);
+    return s.length <= n ? s : s.slice(0, n - 1) + '…';
+  }
+
+  function safeMessage(input) {
+    if (input === null || input === undefined) return 'Terjadi kesalahan.';
+    if (typeof input === 'string') return input;
+    if (typeof input === 'number' || typeof input === 'boolean') return String(input);
+    if (input instanceof Error) return input.message || 'Terjadi kesalahan.';
+    if (typeof input === 'object') {
+      if (typeof input.message === 'string') return input.message;
+      if (typeof input.error === 'string') return input.error;
+      if (typeof input.reason === 'string') return input.reason;
+      try { return JSON.stringify(input); } catch { return 'Terjadi kesalahan.'; }
+    }
+    return String(input);
+  }
+
+  // ---------- status UI ----------
+
+  function setProxyStatus(kind, text) {
+    els.proxyStatus.className = 'pill pill-' + kind;
+    els.proxyStatusText.textContent = text;
+  }
+
+  function setStatus(kind, msg) {
+    if (!msg) {
+      els.status.hidden = true;
+      els.status.textContent = '';
+      els.status.className = 'status';
+      return;
+    }
+    els.status.hidden = false;
+    els.status.className = 'status status-' + kind;
+    els.status.textContent = safeMessage(msg);
+  }
+
+  function setLoading(on) {
+    els.submitBtn.disabled = on;
+    els.submitBtn.classList.toggle('is-loading', on);
+    els.submitText.textContent = on ? 'Scraping...' : 'Scrape Sekarang';
+    if (on) {
+      els.downloadBtn.disabled = true;
+      els.copyJsonBtn.disabled = true;
     }
   }
-  _parse(line) {
-    const parts = line.split(':');
-    if (parts.length !== 4) return null;
-    const [host, port, user, pass] = parts;
-    if (!host || !port || !user || !pass) return null;
-    const portNum = Number(port);
-    if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) return null;
-    return { key: `${host}:${port}:${user}`, host, port: portNum, user, pass, url: `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}` };
-  }
-  get size() { return this.proxies.length; }
-  next() {
-    if (!this.proxies.length) return null;
-    const now = Date.now();
-    for (let i = 0; i < this.proxies.length; i++) {
-      const idx = (this.cursor + i) % this.proxies.length;
-      const p = this.proxies[idx];
-      const st = this.state.get(p.key);
-      if (st && st.cooldownUntil > now) continue;
-      this.cursor = (idx + 1) % this.proxies.length;
-      return p;
-    }
-    this.cursor = (this.cursor + 1) % this.proxies.length;
-    return this.proxies[this.cursor];
-  }
-  markSuccess(p) { if (!p) return; const st = this.state.get(p.key); if (st) { st.failures = 0; st.cooldownUntil = 0; } }
-  markFailure(p) {
-    if (!p) return;
-    const st = this.state.get(p.key);
-    if (!st) return;
-    st.failures += 1;
-    if (st.failures >= PROXY_FAIL_THRESHOLD) st.cooldownUntil = Date.now() + PROXY_COOLDOWN_MS;
-  }
-}
-let _pool = null;
-function getProxyPool() { if (!_pool) _pool = new ProxyPool(); return _pool; }
 
-// 4. RATE LIMIT
-const RL_WINDOW = 60000;
-const RL_MAX = 30;
-const _rlBuckets = new Map();
-function rateLimit(req) {
-  const xff = req.headers['x-forwarded-for'];
-  const key = (typeof xff === 'string' && xff) ? xff.split(',')[0].trim() : (req.socket?.remoteAddress || 'unknown');
-  const now = Date.now();
-  let b = _rlBuckets.get(key);
-  if (!b || now - b.start >= RL_WINDOW) { b = { start: now, count: 0 }; _rlBuckets.set(key, b); }
-  b.count += 1;
-  if (_rlBuckets.size > 2000) for (const [k, v] of _rlBuckets) if (now - v.start >= RL_WINDOW) _rlBuckets.delete(k);
-  return { allowed: b.count <= RL_MAX, remaining: Math.max(0, RL_MAX - b.count), resetAt: b.start + RL_WINDOW };
-}
+  // ---------- health check ----------
 
-// 5. SCRAPER
-const FETCH_TIMEOUT = 6000;
-const MAX_ATTEMPTS = 2;
-const UAS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-];
-function buildHeaders() {
-  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Cache-Control': 'no-cache' };
-}
-function safeErrMessage(err) {
-  if (!err) return 'UNKNOWN';
-  if (typeof err === 'string') return err;
-  if (typeof err.code === 'string') return err.code;
-  if (typeof err.message === 'string') return err.message;
-  try { return JSON.stringify(err); } catch { return 'UNKNOWN'; }
-}
-function normalizeFetchErr(err) {
-  if (!err) return { code: 'UNKNOWN', message: 'Gagal mengambil halaman' };
-  const code = typeof err.code === 'string' ? err.code : 'FETCH_FAILED';
-  if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') return { code: 'TIMEOUT', message: 'Situs target lambat atau proxy timeout' };
-  if (err.response) {
-    const s = err.response.status;
-    if (s === 403) return { code: 'FORBIDDEN', message: 'Situs target menolak (403)' };
-    if (s === 404) return { code: 'NOT_FOUND', message: 'Halaman tidak ditemukan (404)' };
-    if (s === 429) return { code: 'RATE_LIMITED', message: 'Situs target membatasi (429)' };
-    return { code: 'HTTP_ERROR', message: `Situs target merespons ${s}` };
-  }
-  if (code === 'ENOTFOUND') return { code: 'DNS', message: 'Domain tidak ditemukan' };
-  return { code, message: safeErrMessage(err) };
-}
-async function fetchOnce(url, proxy, timeout) {
-  const cfg = { timeout, maxRedirects: 5, responseType: 'text', validateStatus: s => s >= 200 && s < 400, headers: buildHeaders() };
-  if (proxy) {
-    const agent = new HttpsProxyAgent(proxy.url);
-    cfg.httpsAgent = agent; cfg.httpAgent = agent; cfg.proxy = false;
-  }
-  const res = await axios.get(url, cfg);
-  return { html: typeof res.data === 'string' ? res.data : String(res.data), status: res.status, finalUrl: res.request?.res?.responseUrl || url };
-}
-async function fetchWithProxyRotation(url) {
-  const pool = getProxyPool();
-  const attempts = [];
-  let lastErr = null;
-  for (let i = 0; i < MAX_ATTEMPTS; i++) {
-    const proxy = pool.size > 0 ? pool.next() : null;
-    const t0 = Date.now();
+  async function checkHealth() {
     try {
-      const r = await fetchOnce(url, proxy, FETCH_TIMEOUT);
-      if (proxy) pool.markSuccess(proxy);
-      attempts.push({ proxy: proxy ? `${proxy.host}:${proxy.port}` : 'direct', ok: true, durationMs: Date.now() - t0 });
-      return { ...r, proxyUsed: proxy ? `${proxy.host}:${proxy.port}` : null, attempts };
+      const r = await fetch('/api/health', { cache: 'no-store' });
+      if (!r.ok) throw new Error();
+      const d = await r.json();
+      const n = d.proxiesLoaded || 0;
+      setProxyStatus(n === 0 ? 'warn' : 'ok', 'Proxy: ' + n);
+    } catch {
+      setProxyStatus('error', 'Server offline');
+    }
+  }
+
+  // ---------- mode toggle ----------
+
+  function onModeChange() {
+    const isCustom = els.modeSelect.value === 'custom';
+    els.customWrap.hidden = !isCustom;
+    if (isCustom) setTimeout(() => els.customSelector.focus(), 50);
+  }
+
+  // ---------- scrape ----------
+
+  async function onScrape(e) {
+    e.preventDefault();
+    setStatus('', '');
+
+    const url = els.urlInput.value.trim();
+    if (!url) { setStatus('error', 'URL wajib diisi.'); els.urlInput.focus(); return; }
+
+    const mode = els.modeSelect.value;
+    const customSelector = els.customSelector.value.trim();
+    if (mode === 'custom' && !customSelector) {
+      setStatus('error', 'CSS Selector wajib untuk mode custom.');
+      els.customSelector.focus();
+      return;
+    }
+
+    let variableName = els.variableName.value.trim() || 'scrapedData';
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) {
+      setStatus('error', 'Nama variabel harus identifier JS yang valid.');
+      els.variableName.focus();
+      return;
+    }
+    lastVariableName = variableName;
+
+    setLoading(true);
+    els.resultPanel.hidden = true;
+
+    try {
+      const r = await fetch('/api/scrape?format=json', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({ url, mode, customSelector, variableName })
+      });
+
+      const payload = await r.json().catch(() => null);
+      if (!r.ok || !payload || !payload.ok) {
+        const msg = safeMessage(payload && payload.error) || ('Gagal scrape (HTTP ' + r.status + ')');
+        throw new Error(msg);
+      }
+
+      lastResult = payload.data;
+      renderResult(lastResult, mode);
     } catch (err) {
-      if (proxy) pool.markFailure(proxy);
-      lastErr = err;
-      attempts.push({ proxy: proxy ? `${proxy.host}:${proxy.port}` : 'direct', ok: false, durationMs: Date.now() - t0, error: safeErrMessage(err) });
+      setStatus('error', safeMessage(err));
+    } finally {
+      setLoading(false);
     }
   }
-  const f = normalizeFetchErr(lastErr);
-  const e = new Error(f.message);
-  e.code = f.code;
-  e.attempts = attempts;
-  throw e;
-}
 
-// 6. PARSER (DIUPGRADE)
-const norm = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
-const abs = (base, raw) => { if (!raw) return ''; try { return new URL(raw, base).toString(); } catch { return raw; } };
+  // ---------- render result ----------
 
-function parseHtml(html, baseUrl, mode, customSelector) {
-  const $ = cheerio.load(html);
-  
-  // Buang elemen yang bukan konten
-  $('script, style, noscript, nav, footer, header, aside, .ad, .ads, .advertisement').remove();
-  
-  const data = {
-    url: baseUrl,
-    scrapedAt: new Date().toISOString(),
-    title: norm($('title').first().text()) || norm($('meta[property="og:title"]').attr('content')) || '',
-    description: norm($('meta[name="description"]').attr('content')) || norm($('meta[property="og:description"]').attr('content')) || ''
-  };
+  function renderResult(data, mode) {
+    lastFilename = buildFilename(data.url || '', mode);
+    renderStats(data.stats || {});
+    renderAttempts(data.attempts || []);
+    renderPreview(data, mode);
 
-  if (mode === 'all' || mode === 'text') {
-    // Heading
-    const headings = [];
-    for (let lv = 1; lv <= 6; lv++) {
-      $('h' + lv).each((_, el) => {
-        const t = norm($(el).text());
-        if (t) headings.push({ level: lv, text: t });
-      });
+    els.resultBadge.textContent = 'OK';
+    els.resultBadge.className = 'panel-badge panel-badge-ok';
+    els.downloadBtn.disabled = false;
+    els.copyJsonBtn.disabled = false;
+    els.resultPanel.hidden = false;
+
+    setTimeout(() => {
+      els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  }
+
+  function renderStats(s) {
+    const items = [
+      ['Heading', s.headings],
+      ['Paragraf', s.paragraphs],
+      ['Link', s.links],
+      ['Gambar', s.images],
+      ['Tabel', s.tables],
+      ['Custom', s.custom]
+    ].filter(p => typeof p[1] === 'number' && p[1] > 0);
+
+    if (!items.length) { els.statsRow.innerHTML = ''; return; }
+
+    els.statsRow.innerHTML = items.map(p =>
+      '<div class="stat-chip">' +
+        '<span class="stat-value">' + p[1] + '</span>' +
+        '<span class="stat-label">' + esc(p[0]) + '</span>' +
+      '</div>'
+    ).join('');
+  }
+
+  function renderAttempts(attempts) {
+    if (!attempts || !attempts.length) {
+      els.attemptsInfo.hidden = true;
+      els.attemptsInfo.innerHTML = '';
+      return;
     }
-    data.headings = headings;
+    const rows = attempts.map(a =>
+      '<div class="attempt-row ' + (a.ok ? 'ok' : 'fail') + '">' +
+        '<span>' + (a.ok ? '✓' : '✗') + '</span>' +
+        '<span>' + esc(a.proxy || '-') + '</span>' +
+        '<span>' + (a.durationMs || 0) + 'ms</span>' +
+        (a.error ? '<span class="attempt-error">' + esc(safeMessage(a.error)) + '</span>' : '') +
+      '</div>'
+    ).join('');
+    els.attemptsInfo.hidden = false;
+    els.attemptsInfo.innerHTML = '<div class="preview-block"><h3>Percobaan</h3>' + rows + '</div>';
+  }
+
+  function renderPreview(data, mode) {
+    const parts = [];
     
-    // Paragraf
-    const paragraphs = [];
-    $('p').each((_, el) => {
-      const t = norm($(el).text());
-      if (t.length >= 3) paragraphs.push(t);
-    });
+    // Tampilkan warning kalau terdeteksi SPA
+    if (data._warning) {
+      parts.push('<div class="preview-block" style="border-left:4px solid #f59e0b;"><h3 style="color:#f59e0b;">⚠️ Peringatan</h3><div class="preview-item" style="background:rgba(245,158,11,0.1);">' + esc(data._warning) + '</div></div>');
+    }
     
-    // FALLBACK: kalau nggak ada <p>, ambil dari <div>/<article>/<section>
-    if (paragraphs.length === 0) {
-      const fallback = [];
-      $('article, main, section, div').each((_, el) => {
-        const $el = $(el);
-        // Ambil text langsung (bukan dari child)
-        const clone = $el.clone();
-        clone.children().remove();
-        const t = norm(clone.text());
-        if (t.length >= 30) fallback.push(t);
-      });
-      if (fallback.length > 0) {
-        data.paragraphs = fallback;
-        data._fallback = 'div-article';
-      } else {
-        data.paragraphs = [];
+    // Tampilkan rawText kalau ada
+    if (data.rawText && data.rawText.length > 0) {
+      parts.push('<div class="preview-block"><h3>Raw Text (' + data.rawText.length + ' karakter)</h3><div class="preview-item" style="max-height:200px;overflow-y:auto;">' + esc(trunc(data.rawText, 1000)) + '</div></div>');
+    }
+    
+    parts.push(renderMetaBlock(data));
+    if (mode === 'all' || mode === 'text') {
+      parts.push(renderHeadingsBlock(data.headings || []));
+      parts.push(renderParagraphsBlock(data.paragraphs || []));
+    }
+    if (mode === 'all' || mode === 'links') parts.push(renderLinksBlock(data.links || []));
+    if (mode === 'all' || mode === 'images') parts.push(renderImagesBlock(data.images || []));
+    if (mode === 'all' || mode === 'tables') parts.push(renderTablesBlock(data.tables || []));
+    if (mode === 'custom') parts.push(renderCustomBlock(data.custom || []));
+    els.preview.innerHTML = parts.filter(Boolean).join('');
+  }
+
+  function renderMetaBlock(d) {
+    const rows = [
+      ['URL', d.url],
+      ['Final URL', d.finalUrl],
+      ['Title', d.title],
+      ['Description', d.description],
+      ['HTTP', d.httpStatus],
+      ['Proxy', d.proxyUsed || 'direct'],
+      ['Waktu', d.scrapedAt]
+    ];
+    return '<div class="preview-block"><h3>Meta</h3><div class="kv">' +
+      rows.map(r => '<div class="kv-row"><span>' + esc(r[0]) + '</span><span>' + esc(r[1] || '-') + '</span></div>').join('') +
+      '</div></div>';
+  }
+
+  function renderHeadingsBlock(hs) {
+    if (!hs.length) return '';
+    const sample = hs.slice(0, 10);
+    return '<div class="preview-block"><h3>Heading (' + hs.length + ')</h3><div class="preview-list">' +
+      sample.map(h => '<div class="preview-item"><span class="preview-label">H' + h.level + '</span>' + esc(trunc(h.text, 160)) + '</div>').join('') +
+      (hs.length > sample.length ? '<div class="preview-more">+' + (hs.length - sample.length) + ' heading lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderParagraphsBlock(ps) {
+    if (!ps.length) return '';
+    const sample = ps.slice(0, 6);
+    return '<div class="preview-block"><h3>Paragraf (' + ps.length + ')</h3><div class="preview-list">' +
+      sample.map(p => '<div class="preview-item">' + esc(trunc(p, 220)) + '</div>').join('') +
+      (ps.length > sample.length ? '<div class="preview-more">+' + (ps.length - sample.length) + ' paragraf lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderLinksBlock(ls) {
+    if (!ls.length) return '';
+    const sample = ls.slice(0, 10);
+    return '<div class="preview-block"><h3>Link (' + ls.length + ')</h3><div class="preview-list">' +
+      sample.map(l => '<div class="preview-item"><span class="preview-label">A</span>' + esc(l.text ? trunc(l.text, 60) : '(tanpa teks)') + ' — <span style="color:var(--gray-600);word-break:break-all">' + esc(trunc(l.url, 120)) + '</span></div>').join('') +
+      (ls.length > sample.length ? '<div class="preview-more">+' + (ls.length - sample.length) + ' link lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderImagesBlock(ims) {
+    if (!ims.length) return '';
+    const sample = ims.slice(0, 10);
+    return '<div class="preview-block"><h3>Gambar (' + ims.length + ')</h3><div class="preview-list">' +
+      sample.map(i => '<div class="preview-item"><span class="preview-label">IMG</span>' + esc(i.alt || '(tanpa alt)') + ' — <span style="color:var(--gray-600);word-break:break-all">' + esc(trunc(i.url, 120)) + '</span></div>').join('') +
+      (ims.length > sample.length ? '<div class="preview-more">+' + (ims.length - sample.length) + ' gambar lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderTablesBlock(ts) {
+    if (!ts.length) return '';
+    return '<div class="preview-block"><h3>Tabel (' + ts.length + ')</h3><div class="preview-list">' +
+      ts.slice(0, 5).map(t => '<div class="preview-item">Tabel #' + (t.index + 1) + (t.caption ? ' — ' + esc(trunc(t.caption, 60)) : '') + ' · ' + t.rows.length + ' baris · ' + t.headers.length + ' kolom</div>').join('') +
+      (ts.length > 5 ? '<div class="preview-more">+' + (ts.length - 5) + ' tabel lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderCustomBlock(cs) {
+    if (!cs.length) return '<div class="preview-block"><h3>Custom</h3><div class="preview-more">Tidak ada elemen cocok.</div></div>';
+    return '<div class="preview-block"><h3>Custom (' + cs.length + ')</h3><div class="preview-list">' +
+      cs.slice(0, 10).map(c => '<div class="preview-item"><span class="preview-label">' + esc(c.tag) + '</span>' + esc(trunc(c.text, 160)) + '</div>').join('') +
+      (cs.length > 10 ? '<div class="preview-more">+' + (cs.length - 10) + ' lainnya</div>' : '') +
+      '</div></div>';
+  }
+
+  // ---------- actions ----------
+
+  function buildFilename(url, mode) {
+    let host = 'scrape';
+    try { host = new URL(url).hostname.replace(/[^a-z0-9.-]/gi, '_'); } catch {}
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    return host + '_' + String(mode || 'all').replace(/[^a-z0-9]/gi, '') + '_' + ts + '.js';
+  }
+
+  function buildJsFile(data, varName, mode) {
+    const header = '// Generated by FASTSCRAPE\n// Source URL: ' + (data.url || '') + '\n// Scraped at: ' + (data.scrapedAt || '') + '\n// Mode: ' + mode + '\n\n';
+    const body = 'const ' + varName + ' = ' + JSON.stringify(data, null, 2) + ';\n';
+    const footer = '\nif (typeof module !== "undefined" && module.exports) {\n  module.exports = ' + varName + ';\n}\n';
+    return header + body + footer;
+  }
+
+  function onDownload() {
+    if (!lastResult) return;
+    const content = buildJsFile(lastResult, lastVariableName, els.modeSelect.value);
+    const blob = new Blob([content], { type: 'application/javascript;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = lastFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function onCopy() {
+    if (!lastResult) return;
+    const txt = JSON.stringify(lastResult, null, 2);
+    try {
+      await navigator.clipboard.writeText(txt);
+      setStatus('success', 'JSON disalin ke clipboard.');
+      setTimeout(() => setStatus('', ''), 2500);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        setStatus('success', 'JSON disalin.');
+      } catch {
+        setStatus('error', 'Gagal menyalin.');
       }
-    } else {
-      data.paragraphs = paragraphs;
-    }
-    
-    // RAW TEXT: semua text di body
-    const bodyText = norm($('body').text());
-    if (bodyText) {
-      data.rawText = bodyText.slice(0, 20000);
-    }
-    
-    // SPA DETECTION
-    if (!data.title && bodyText.length < 200) {
-      data._warning = 'Situs ini kemungkinan SPA (JavaScript-rendered). Konten asli tidak ada di HTML mentah.';
+      document.body.removeChild(ta);
+      setTimeout(() => setStatus('', ''), 2500);
     }
   }
 
-  if (mode === 'all' || mode === 'links') {
-    const seen = new Set(); const links = [];
-    $('a[href]').each((_, el) => {
-      const url = abs(baseUrl, $(el).attr('href') || '');
-      if (!url || seen.has(url)) return;
-      seen.add(url);
-      links.push({ url, text: norm($(el).text()), rel: norm($(el).attr('rel') || ''), target: norm($(el).attr('target') || '') });
-    });
-    data.links = links;
-  }
+  // ---------- init ----------
 
-  if (mode === 'all' || mode === 'images') {
-    const seen = new Set(); const imgs = [];
-    $('img').each((_, el) => {
-      const raw = $(el).attr('src') || $(el).attr('data-src') || '';
-      const url = abs(baseUrl, raw);
-      if (!url || seen.has(url)) return;
-      seen.add(url);
-      imgs.push({ url, alt: norm($(el).attr('alt') || ''), width: $(el).attr('width') || null, height: $(el).attr('height') || null });
-    });
-    data.images = imgs;
-  }
+  els.form.addEventListener('submit', onScrape);
+  els.modeSelect.addEventListener('change', onModeChange);
+  els.downloadBtn.addEventListener('click', onDownload);
+  els.copyJsonBtn.addEventListener('click', onCopy);
 
-  if (mode === 'all' || mode === 'tables') {
-    const tables = [];
-    $('table').each((idx, tEl) => {
-      const $t = $(tEl);
-      const caption = norm($t.find('caption').first().text());
-      const headers = [];
-      $t.find('thead tr').first().find('th, td').each((_, th) => headers.push(norm($(th).text())));
-      if (headers.length === 0) {
-        let hasTh = false;
-        $t.find('tr').first().find('th').each((_, th) => { hasTh = true; headers.push(norm($(th).text())); });
-        if (!hasTh) $t.find('tr').first().find('td').each((_, td) => headers.push(norm($(td).text())));
-      }
-      const rows = [];
-      $t.find('tbody tr').each((_, tr) => { const cells = []; $(tr).find('td, th').each((_, c) => cells.push(norm($(c).text()))); if (cells.length) rows.push(cells); });
-      if (rows.length === 0) $t.find('tr').each((ri, tr) => { if (ri === 0) return; const cells = []; $(tr).find('td, th').each((_, c) => cells.push(norm($(c).text()))); if (cells.length) rows.push(cells); });
-      if (headers.length || rows.length) tables.push({ index: idx, caption, headers, rows });
-    });
-    data.tables = tables;
-  }
-
-  if (mode === 'custom') {
-    data.customSelector = customSelector;
-    const results = []; const seen = new Set();
-    $(customSelector).each((_, el) => {
-      const $el = $(el);
-      const item = {
-        tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
-        text: norm($el.text()),
-        html: $el.html() ? $el.html().trim().slice(0, 2000) : '',
-        href: abs(baseUrl, $el.attr('href') || ''),
-        src: abs(baseUrl, $el.attr('src') || '')
-      };
-      const k = `${item.tag}|${item.text.slice(0,80)}|${item.href}|${item.src}`;
-      if (seen.has(k)) return;
-      seen.add(k);
-      results.push(item);
-    });
-    data.custom = results;
-  }
-
-  data.stats = {
-    headings: data.headings?.length || 0,
-    paragraphs: data.paragraphs?.length || 0,
-    links: data.links?.length || 0,
-    images: data.images?.length || 0,
-    tables: data.tables?.length || 0,
-    custom: data.custom?.length || 0
-  };
-  return data;
-}
-
-// 7. EXPORTER & HANDLER
-function buildJsFile(data, options) {
-  const name = options.variableName && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(options.variableName) ? options.variableName : 'scrapedData';
-  const header = `// Generated by FASTSCRAPE\n// Source URL: ${(data.url||'').replace(/\r?\n/g,' ')}\n// Scraped at: ${data.scrapedAt||''}\n// Mode: ${options.mode||'all'}\n\n`;
-  const body = `const ${name} = ${JSON.stringify(data, null, 2)};\n`;
-  const footer = `\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = ${name};\n}\n`;
-  return header + body + footer;
-}
-function buildFilename(url, mode) {
-  let host = 'scrape';
-  try { host = new URL(url).hostname.replace(/[^a-z0-9.-]/gi, '_'); } catch {}
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  return `${host}_${String(mode||'all').replace(/[^a-z0-9]/gi,'')}_${ts}.js`;
-}
-const VALID_MODES = new Set(['all','text','links','images','tables','custom']);
-function sendJson(res, status, body) { res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(body)); }
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let raw = '';
-    req.on('data', c => { raw += c; if (raw.length > 1000000) { reject(new Error('Body terlalu besar')); req.destroy(); } });
-    req.on('end', () => { if (!raw) return resolve({}); try { resolve(JSON.parse(raw)); } catch { reject(new Error('Body bukan JSON valid')); } });
-    req.on('error', reject);
-  });
-}
-function normalizeError(err) {
-  if (!err) return 'Terjadi kesalahan.';
-  if (typeof err === 'string') return err;
-  if (typeof err.message === 'string') return err.message;
-  try { return JSON.stringify(err); } catch { return 'Terjadi kesalahan.'; }
-}
-module.exports = async function handler(req, res) {
-  if (req.method === 'GET') return sendJson(res, 200, { ok: true, proxiesLoaded: getProxyPool().size, message: 'Endpoint aktif.' });
-  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'Method tidak diizinkan' });
-  const limit = rateLimit(req);
-  if (!limit.allowed) { res.setHeader('Retry-After', Math.ceil((limit.resetAt - Date.now()) / 1000)); return sendJson(res, 429, { ok: false, error: 'Terlalu banyak permintaan' }); }
-  let body;
-  try { body = await readJson(req); } catch (err) { return sendJson(res, 400, { ok: false, error: normalizeError(err) }); }
-  const { url, mode = 'all', customSelector = '', variableName = 'scrapedData' } = body || {};
-  if (!VALID_MODES.has(mode)) return sendJson(res, 400, { ok: false, error: 'Mode tidak valid' });
-  if (mode === 'custom' && !customSelector) return sendJson(res, 400, { ok: false, error: 'customSelector wajib' });
-  const v = validateUrl(url);
-  if (!v.valid) return sendJson(res, 400, { ok: false, error: v.reason });
-  try {
-    const f = await fetchWithProxyRotation(v.url);
-    const parsed = parseHtml(f.html, f.finalUrl || v.url, mode, customSelector);
-    parsed.proxyUsed = f.proxyUsed;
-    parsed.httpStatus = f.status;
-    parsed.finalUrl = f.finalUrl;
-    parsed.attempts = f.attempts;
-    const wantsJson = req.query?.format === 'json' || req.headers.accept?.includes('application/json');
-    if (wantsJson) return sendJson(res, 200, { ok: true, data: parsed });
-    const js = buildJsFile(parsed, { mode, variableName });
-    const fn = buildFilename(v.url, mode);
-    res.status(200);
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${fn}"`);
-    return res.end(js);
-  } catch (err) {
-    return sendJson(res, 502, { ok: false, error: normalizeError(err), code: normalizeError(err.code || 'SCRAPE_FAILED'), attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : [] });
-  }
-};
+  onModeChange();
+  checkHealth();
+})();
