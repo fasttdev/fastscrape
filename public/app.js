@@ -37,6 +37,22 @@
     return s.length <= n ? s : s.slice(0, n - 1) + '…';
   }
 
+  // --- FIX: selalu ubah apa pun jadi string yang aman ---
+  function safeMessage(input) {
+    if (input === null || input === undefined) return 'Terjadi kesalahan.';
+    if (typeof input === 'string') return input;
+    if (typeof input === 'number' || typeof input === 'boolean') return String(input);
+    if (input instanceof Error) return input.message || 'Terjadi kesalahan.';
+    if (typeof input === 'object') {
+      if (typeof input.message === 'string') return input.message;
+      if (typeof input.error === 'string') return input.error;
+      if (typeof input.reason === 'string') return input.reason;
+      try { return JSON.stringify(input); } catch { return 'Terjadi kesalahan.'; }
+    }
+    return String(input);
+  }
+  // --- END FIX ---
+
   function setProxyStatus(kind, text) {
     els.proxyStatus.className = 'pill pill-' + kind;
     els.proxyStatusText.textContent = text;
@@ -46,7 +62,7 @@
     if (!msg) { els.status.hidden = true; els.status.textContent = ''; els.status.className = 'status'; return; }
     els.status.hidden = false;
     els.status.className = 'status status-' + kind;
-    els.status.textContent = msg;
+    els.status.textContent = safeMessage(msg); // paksa string
   }
 
   function setLoading(on) {
@@ -94,11 +110,16 @@
         body: JSON.stringify({ url, mode, customSelector, variableName })
       });
       const payload = await r.json().catch(() => null);
-      if (!r.ok || !payload || !payload.ok) throw new Error((payload && payload.error) || ('Gagal scrape (HTTP ' + r.status + ')'));
+      if (!r.ok || !payload || !payload.ok) {
+        // --- FIX: jangan lempar objek mentah ---
+        const msg = safeMessage(payload && payload.error) || ('Gagal scrape (HTTP ' + r.status + ')');
+        throw new Error(msg);
+      }
       lastResult = payload.data;
       renderResult(lastResult, mode);
     } catch (err) {
-      setStatus('error', (err && err.message) || 'Gagal scrape.');
+      // --- FIX: pastikan err yang dilempar bukan objek mentah ---
+      setStatus('error', safeMessage(err));
     } finally {
       setLoading(false);
     }
@@ -133,7 +154,7 @@
         '<span>' + (a.ok ? '✓' : '✗') + '</span>' +
         '<span>' + esc(a.proxy || '-') + '</span>' +
         '<span>' + (a.durationMs || 0) + 'ms</span>' +
-        (a.error ? '<span class="attempt-error">' + esc(a.error) + '</span>' : '') +
+        (a.error ? '<span class="attempt-error">' + esc(safeMessage(a.error)) + '</span>' : '') +
       '</div>'
     ).join('');
     els.attemptsInfo.hidden = false;
