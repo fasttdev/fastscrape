@@ -26,16 +26,9 @@
   let lastVariableName = 'scrapedData';
   let lastFilename = 'scrape.js';
 
-  // ---------- utils ----------
-
   function esc(s) {
     if (s === null || s === undefined) return '';
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function trunc(s, n) {
@@ -47,18 +40,14 @@
   function safeMessage(input) {
     if (input === null || input === undefined) return 'Terjadi kesalahan.';
     if (typeof input === 'string') return input;
-    if (typeof input === 'number' || typeof input === 'boolean') return String(input);
     if (input instanceof Error) return input.message || 'Terjadi kesalahan.';
     if (typeof input === 'object') {
       if (typeof input.message === 'string') return input.message;
       if (typeof input.error === 'string') return input.error;
-      if (typeof input.reason === 'string') return input.reason;
       try { return JSON.stringify(input); } catch { return 'Terjadi kesalahan.'; }
     }
     return String(input);
   }
-
-  // ---------- status UI ----------
 
   function setProxyStatus(kind, text) {
     els.proxyStatus.className = 'pill pill-' + kind;
@@ -66,12 +55,7 @@
   }
 
   function setStatus(kind, msg) {
-    if (!msg) {
-      els.status.hidden = true;
-      els.status.textContent = '';
-      els.status.className = 'status';
-      return;
-    }
+    if (!msg) { els.status.hidden = true; els.status.textContent = ''; els.status.className = 'status'; return; }
     els.status.hidden = false;
     els.status.className = 'status status-' + kind;
     els.status.textContent = safeMessage(msg);
@@ -81,13 +65,8 @@
     els.submitBtn.disabled = on;
     els.submitBtn.classList.toggle('is-loading', on);
     els.submitText.textContent = on ? 'Scraping...' : 'Scrape Sekarang';
-    if (on) {
-      els.downloadBtn.disabled = true;
-      els.copyJsonBtn.disabled = true;
-    }
+    if (on) { els.downloadBtn.disabled = true; els.copyJsonBtn.disabled = true; }
   }
-
-  // ---------- health check ----------
 
   async function checkHealth() {
     try {
@@ -96,12 +75,8 @@
       const d = await r.json();
       const n = d.proxiesLoaded || 0;
       setProxyStatus(n === 0 ? 'warn' : 'ok', 'Proxy: ' + n);
-    } catch {
-      setProxyStatus('error', 'Server offline');
-    }
+    } catch { setProxyStatus('error', 'Server offline'); }
   }
-
-  // ---------- mode toggle ----------
 
   function onModeChange() {
     const isCustom = els.modeSelect.value === 'custom';
@@ -109,29 +84,16 @@
     if (isCustom) setTimeout(() => els.customSelector.focus(), 50);
   }
 
-  // ---------- scrape ----------
-
   async function onScrape(e) {
     e.preventDefault();
     setStatus('', '');
-
     const url = els.urlInput.value.trim();
     if (!url) { setStatus('error', 'URL wajib diisi.'); els.urlInput.focus(); return; }
-
     const mode = els.modeSelect.value;
     const customSelector = els.customSelector.value.trim();
-    if (mode === 'custom' && !customSelector) {
-      setStatus('error', 'CSS Selector wajib untuk mode custom.');
-      els.customSelector.focus();
-      return;
-    }
-
+    if (mode === 'custom' && !customSelector) { setStatus('error', 'CSS Selector wajib untuk mode custom.'); els.customSelector.focus(); return; }
     let variableName = els.variableName.value.trim() || 'scrapedData';
-    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) {
-      setStatus('error', 'Nama variabel harus identifier JS yang valid.');
-      els.variableName.focus();
-      return;
-    }
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(variableName)) { setStatus('error', 'Nama variabel harus identifier JS valid.'); els.variableName.focus(); return; }
     lastVariableName = variableName;
 
     setLoading(true);
@@ -140,19 +102,14 @@
     try {
       const r = await fetch('/api/scrape?format=json', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify({ url, mode, customSelector, variableName })
       });
-
       const payload = await r.json().catch(() => null);
       if (!r.ok || !payload || !payload.ok) {
         const msg = safeMessage(payload && payload.error) || ('Gagal scrape (HTTP ' + r.status + ')');
         throw new Error(msg);
       }
-
       lastResult = payload.data;
       renderResult(lastResult, mode);
     } catch (err) {
@@ -162,51 +119,42 @@
     }
   }
 
-  // ---------- render result ----------
-
-  function renderResult(data, mode) {
+  function renderResult(payload, mode) {
+    const data = payload.result || payload;
+    
     lastFilename = buildFilename(data.url || '', mode);
     renderStats(data.stats || {});
-    renderAttempts(data.attempts || []);
-    renderPreview(data, mode);
+    renderAttempts(payload.attempts || data.attempts || []);
+    
+    let engineInfo = '';
+    if (payload.time || payload.engine) {
+       engineInfo = '<div class="preview-block" style="background:rgba(96,165,250,0.1);"><h3>Engine Info</h3><div class="kv">' +
+         '<div class="kv-row"><span>Engine</span><span>' + esc(payload.engine || 'unknown') + '</span></div>' +
+         '<div class="kv-row"><span>Waktu Scrape</span><span>' + esc(payload.time || '-') + '</span></div>' +
+         '</div></div>';
+    }
+
+    els.preview.innerHTML = engineInfo + renderPreviewHTML(data, mode);
 
     els.resultBadge.textContent = 'OK';
     els.resultBadge.className = 'panel-badge panel-badge-ok';
     els.downloadBtn.disabled = false;
     els.copyJsonBtn.disabled = false;
     els.resultPanel.hidden = false;
-
-    setTimeout(() => {
-      els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 50);
+    setTimeout(() => { els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
   }
 
   function renderStats(s) {
-    const items = [
-      ['Heading', s.headings],
-      ['Paragraf', s.paragraphs],
-      ['Link', s.links],
-      ['Gambar', s.images],
-      ['Tabel', s.tables],
-      ['Custom', s.custom]
-    ].filter(p => typeof p[1] === 'number' && p[1] > 0);
-
+    const items = [['Heading', s.headings], ['Paragraf', s.paragraphs], ['Link', s.links], ['Gambar', s.images], ['Tabel', s.tables], ['Custom', s.custom]]
+      .filter(p => typeof p[1] === 'number' && p[1] > 0);
     if (!items.length) { els.statsRow.innerHTML = ''; return; }
-
     els.statsRow.innerHTML = items.map(p =>
-      '<div class="stat-chip">' +
-        '<span class="stat-value">' + p[1] + '</span>' +
-        '<span class="stat-label">' + esc(p[0]) + '</span>' +
-      '</div>'
+      '<div class="stat-chip"><span class="stat-value">' + p[1] + '</span><span class="stat-label">' + esc(p[0]) + '</span></div>'
     ).join('');
   }
 
   function renderAttempts(attempts) {
-    if (!attempts || !attempts.length) {
-      els.attemptsInfo.hidden = true;
-      els.attemptsInfo.innerHTML = '';
-      return;
-    }
+    if (!attempts || !attempts.length) { els.attemptsInfo.hidden = true; els.attemptsInfo.innerHTML = ''; return; }
     const rows = attempts.map(a =>
       '<div class="attempt-row ' + (a.ok ? 'ok' : 'fail') + '">' +
         '<span>' + (a.ok ? '✓' : '✗') + '</span>' +
@@ -219,8 +167,19 @@
     els.attemptsInfo.innerHTML = '<div class="preview-block"><h3>Percobaan</h3>' + rows + '</div>';
   }
 
-  function renderPreview(data, mode) {
-    const parts = [renderMetaBlock(data)];
+  function renderPreviewHTML(data, mode) {
+    const parts = [];
+    if (data._warning) {
+      parts.push('<div class="preview-block" style="border-left:4px solid #f59e0b;"><h3 style="color:#f59e0b;">⚠️ Peringatan</h3><div class="preview-item" style="background:rgba(245,158,11,0.1);">' + esc(data._warning) + '</div></div>');
+    }
+    if (data.rawText && data.rawText.length > 0) {
+      parts.push('<div class="preview-block"><h3>Raw Text (' + data.rawText.length + ' karakter)</h3><div class="preview-item" style="max-height:200px;overflow-y:auto;">' + esc(trunc(data.rawText, 1000)) + '</div></div>');
+    }
+    
+    parts.push(renderMetaBlock(data));
+    if (data.meta && (data.meta.og || data.meta.twitter)) parts.push(renderSEOMetaBlock(data.meta));
+    if (data.structuredData && data.structuredData.length > 0) parts.push(renderStructuredData(data.structuredData));
+
     if (mode === 'all' || mode === 'text') {
       parts.push(renderHeadingsBlock(data.headings || []));
       parts.push(renderParagraphsBlock(data.paragraphs || []));
@@ -229,21 +188,43 @@
     if (mode === 'all' || mode === 'images') parts.push(renderImagesBlock(data.images || []));
     if (mode === 'all' || mode === 'tables') parts.push(renderTablesBlock(data.tables || []));
     if (mode === 'custom') parts.push(renderCustomBlock(data.custom || []));
-    els.preview.innerHTML = parts.filter(Boolean).join('');
+    
+    return parts.filter(Boolean).join('');
   }
 
   function renderMetaBlock(d) {
     const rows = [
       ['URL', d.url],
-      ['Final URL', d.finalUrl],
-      ['Title', d.title],
-      ['Description', d.description],
+      ['Title', d.title || (d.meta && d.meta.title)],
+      ['Description', d.description || (d.meta && d.meta.description)],
+      ['Domain', d.domain],
       ['HTTP', d.httpStatus],
       ['Proxy', d.proxyUsed || 'direct'],
       ['Waktu', d.scrapedAt]
     ];
-    return '<div class="preview-block"><h3>Meta</h3><div class="kv">' +
+    return '<div class="preview-block"><h3>Informasi Dasar</h3><div class="kv">' +
       rows.map(r => '<div class="kv-row"><span>' + esc(r[0]) + '</span><span>' + esc(r[1] || '-') + '</span></div>').join('') +
+      '</div></div>';
+  }
+
+  function renderSEOMetaBlock(meta) {
+    let rows = [];
+    if (meta.og && meta.og.title) {
+      rows.push('<div class="kv-row"><span>OG Title</span><span>' + esc(meta.og.title) + '</span></div>');
+      rows.push('<div class="kv-row"><span>OG Image</span><span style="word-break:break-all">' + esc(meta.og.image) + '</span></div>');
+    }
+    if (meta.keywords) rows.push('<div class="kv-row"><span>Keywords</span><span>' + esc(meta.keywords) + '</span></div>');
+    if (meta.author) rows.push('<div class="kv-row"><span>Author</span><span>' + esc(meta.author) + '</span></div>');
+    if (meta.generator) rows.push('<div class="kv-row"><span>Generator</span><span>' + esc(meta.generator) + '</span></div>');
+    
+    if (rows.length === 0) return '';
+    return '<div class="preview-block"><h3>SEO &amp; OpenGraph Meta</h3><div class="kv">' + rows.join('') + '</div></div>';
+  }
+
+  function renderStructuredData(ldData) {
+    return '<div class="preview-block"><h3>Structured Data (JSON-LD)</h3><div class="preview-list">' +
+      ldData.slice(0, 3).map(ld => '<div class="preview-item"><pre style="margin:0;font-size:10px;overflow-x:auto;">' + esc(trunc(JSON.stringify(ld, null, 2), 500)) + '</pre></div>').join('') +
+      (ldData.length > 3 ? '<div class="preview-more">+' + (ldData.length - 3) + ' data lainnya</div>' : '') +
       '</div></div>';
   }
 
@@ -299,8 +280,6 @@
       '</div></div>';
   }
 
-  // ---------- actions ----------
-
   function buildFilename(url, mode) {
     let host = 'scrape';
     try { host = new URL(url).hostname.replace(/[^a-z0-9.-]/gi, '_'); } catch {}
@@ -309,7 +288,7 @@
   }
 
   function buildJsFile(data, varName, mode) {
-    const header = '// Generated by FASTSCRAPE\n// Source URL: ' + (data.url || '') + '\n// Scraped at: ' + (data.scrapedAt || '') + '\n// Mode: ' + mode + '\n\n';
+    const header = '// Generated by FASTSCRAPE\n// Source URL: ' + (data.result?.url || data.url || '') + '\n// Scraped at: ' + new Date().toISOString() + '\n\n';
     const body = 'const ' + varName + ' = ' + JSON.stringify(data, null, 2) + ';\n';
     const footer = '\nif (typeof module !== "undefined" && module.exports) {\n  module.exports = ' + varName + ';\n}\n';
     return header + body + footer;
@@ -338,27 +317,17 @@
       setTimeout(() => setStatus('', ''), 2500);
     } catch {
       const ta = document.createElement('textarea');
-      ta.value = txt;
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-        setStatus('success', 'JSON disalin.');
-      } catch {
-        setStatus('error', 'Gagal menyalin.');
-      }
+      ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); setStatus('success', 'JSON disalin.'); } catch { setStatus('error', 'Gagal menyalin.'); }
       document.body.removeChild(ta);
       setTimeout(() => setStatus('', ''), 2500);
     }
   }
 
-  // ---------- init ----------
-
   els.form.addEventListener('submit', onScrape);
   els.modeSelect.addEventListener('change', onModeChange);
   els.downloadBtn.addEventListener('click', onDownload);
   els.copyJsonBtn.addEventListener('click', onCopy);
-
   onModeChange();
   checkHealth();
 })();
