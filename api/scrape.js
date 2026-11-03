@@ -2,9 +2,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
-// ============================================================
-// 1. PROXY HARDCODED (50 buah)
-// ============================================================
+// 1. PROXY HARDCODED
 const HARDCODED_PROXIES = `
 45.38.107.97:6014:fbfecafr:8xvxfyeqey9u
 64.137.96.74:6641:fbfecafr:8xvxfyeqey9u
@@ -58,19 +56,15 @@ const HARDCODED_PROXIES = `
 198.46.161.42:5092:rrwxlwav:w14oaultk4at
 `.trim();
 
-// ============================================================
 // 2. URL VALIDATOR
-// ============================================================
 const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
 const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
 const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
-
 function isPrivateIp(host) {
   const h = host.replace(/^\[|\]$/g, '');
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h) && !h.includes(':')) return false;
   return PRIVATE_IP_REGEX.some(rx => rx.test(h));
 }
-
 function validateUrl(input) {
   if (!input || typeof input !== 'string') return { valid: false, reason: 'URL kosong' };
   let parsed;
@@ -83,16 +77,12 @@ function validateUrl(input) {
   return { valid: true, url: parsed.toString() };
 }
 
-// ============================================================
 // 3. PROXY POOL
-// ============================================================
 const PROXY_FAIL_THRESHOLD = 3;
 const PROXY_COOLDOWN_MS = 60000;
-
 class ProxyPool {
   constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
   _load() {
-    // GUNAKAN HARDCODED, BUKAN ENV VAR LAGI
     const raw = HARDCODED_PROXIES || '';
     for (const line of raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
       const p = this._parse(line);
@@ -106,11 +96,7 @@ class ProxyPool {
     if (!host || !port || !user || !pass) return null;
     const portNum = Number(port);
     if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) return null;
-    return {
-      key: `${host}:${port}:${user}`,
-      host, port: portNum, user, pass,
-      url: `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`
-    };
+    return { key: `${host}:${port}:${user}`, host, port: portNum, user, pass, url: `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}` };
   }
   get size() { return this.proxies.length; }
   next() {
@@ -135,21 +121,11 @@ class ProxyPool {
     st.failures += 1;
     if (st.failures >= PROXY_FAIL_THRESHOLD) st.cooldownUntil = Date.now() + PROXY_COOLDOWN_MS;
   }
-  snapshot() {
-    const now = Date.now();
-    return this.proxies.map(p => {
-      const st = this.state.get(p.key);
-      return { host: p.host, port: p.port, userMasked: p.user.slice(0,3)+'***', failures: st.failures, coolingDown: st.cooldownUntil > now };
-    });
-  }
 }
-
 let _pool = null;
 function getProxyPool() { if (!_pool) _pool = new ProxyPool(); return _pool; }
 
-// ============================================================
 // 4. RATE LIMIT
-// ============================================================
 const RL_WINDOW = 60000;
 const RL_MAX = 30;
 const _rlBuckets = new Map();
@@ -164,9 +140,7 @@ function rateLimit(req) {
   return { allowed: b.count <= RL_MAX, remaining: Math.max(0, RL_MAX - b.count), resetAt: b.start + RL_WINDOW };
 }
 
-// ============================================================
-// 5. SCRAPER
-// ============================================================
+// 5. SCRAPER (AXIOS)
 const FETCH_TIMEOUT = 6000;
 const MAX_ATTEMPTS = 2;
 const UAS = [
@@ -175,17 +149,9 @@ const UAS = [
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'
 ];
-
 function buildHeaders() {
-  return {
-    'User-Agent': UAS[Math.floor(Math.random() * UAS.length)],
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Cache-Control': 'no-cache'
-  };
+  return { 'User-Agent': UAS[Math.floor(Math.random() * UAS.length)], 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,id;q=0.8', 'Accept-Encoding': 'gzip, deflate, br', 'Cache-Control': 'no-cache' };
 }
-
 function safeErrMessage(err) {
   if (!err) return 'UNKNOWN';
   if (typeof err === 'string') return err;
@@ -193,7 +159,6 @@ function safeErrMessage(err) {
   if (typeof err.message === 'string') return err.message;
   try { return JSON.stringify(err); } catch { return 'UNKNOWN'; }
 }
-
 function normalizeFetchErr(err) {
   if (!err) return { code: 'UNKNOWN', message: 'Gagal mengambil halaman' };
   const code = typeof err.code === 'string' ? err.code : 'FETCH_FAILED';
@@ -208,7 +173,6 @@ function normalizeFetchErr(err) {
   if (code === 'ENOTFOUND') return { code: 'DNS', message: 'Domain tidak ditemukan' };
   return { code, message: safeErrMessage(err) };
 }
-
 async function fetchOnce(url, proxy, timeout) {
   const cfg = { timeout, maxRedirects: 5, responseType: 'text', validateStatus: s => s >= 200 && s < 400, headers: buildHeaders() };
   if (proxy) {
@@ -216,13 +180,8 @@ async function fetchOnce(url, proxy, timeout) {
     cfg.httpsAgent = agent; cfg.httpAgent = agent; cfg.proxy = false;
   }
   const res = await axios.get(url, cfg);
-  return {
-    html: typeof res.data === 'string' ? res.data : String(res.data),
-    status: res.status,
-    finalUrl: res.request?.res?.responseUrl || url
-  };
+  return { html: typeof res.data === 'string' ? res.data : String(res.data), status: res.status, finalUrl: res.request?.res?.responseUrl || url };
 }
-
 async function fetchWithProxyRotation(url) {
   const pool = getProxyPool();
   const attempts = [];
@@ -248,21 +207,12 @@ async function fetchWithProxyRotation(url) {
   throw e;
 }
 
-// ============================================================
 // 6. PARSER
-// ============================================================
 const norm = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
 const abs = (base, raw) => { if (!raw) return ''; try { return new URL(raw, base).toString(); } catch { return raw; } };
-
 function parseHtml(html, baseUrl, mode, customSelector) {
   const $ = cheerio.load(html);
-  const data = {
-    url: baseUrl,
-    scrapedAt: new Date().toISOString(),
-    title: norm($('title').first().text()) || norm($('meta[property="og:title"]').attr('content')) || '',
-    description: norm($('meta[name="description"]').attr('content')) || norm($('meta[property="og:description"]').attr('content')) || ''
-  };
-
+  const data = { url: baseUrl, scrapedAt: new Date().toISOString(), title: norm($('title').first().text()) || norm($('meta[property="og:title"]').attr('content')) || '', description: norm($('meta[name="description"]').attr('content')) || norm($('meta[property="og:description"]').attr('content')) || '' };
   if (mode === 'all' || mode === 'text') {
     const headings = [];
     for (let lv = 1; lv <= 6; lv++) $('h'+lv).each((_, el) => { const t = norm($(el).text()); if (t) headings.push({ level: lv, text: t }); });
@@ -271,7 +221,6 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     $('p').each((_, el) => { const t = norm($(el).text()); if (t.length >= 3) ps.push(t); });
     data.paragraphs = ps;
   }
-
   if (mode === 'all' || mode === 'links') {
     const seen = new Set(); const links = [];
     $('a[href]').each((_, el) => {
@@ -282,7 +231,6 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.links = links;
   }
-
   if (mode === 'all' || mode === 'images') {
     const seen = new Set(); const imgs = [];
     $('img').each((_, el) => {
@@ -294,7 +242,6 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.images = imgs;
   }
-
   if (mode === 'all' || mode === 'tables') {
     const tables = [];
     $('table').each((idx, tEl) => {
@@ -314,19 +261,12 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.tables = tables;
   }
-
   if (mode === 'custom') {
     data.customSelector = customSelector;
     const results = []; const seen = new Set();
     $(customSelector).each((_, el) => {
       const $el = $(el);
-      const item = {
-        tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
-        text: norm($el.text()),
-        html: $el.html() ? $el.html().trim().slice(0, 2000) : '',
-        href: abs(baseUrl, $el.attr('href') || ''),
-        src: abs(baseUrl, $el.attr('src') || '')
-      };
+      const item = { tag: el.tagName ? el.tagName.toLowerCase() : 'unknown', text: norm($el.text()), html: $el.html() ? $el.html().trim().slice(0, 2000) : '', href: abs(baseUrl, $el.attr('href') || ''), src: abs(baseUrl, $el.attr('src') || '') };
       const k = `${item.tag}|${item.text.slice(0,80)}|${item.href}|${item.src}`;
       if (seen.has(k)) return;
       seen.add(k);
@@ -334,21 +274,11 @@ function parseHtml(html, baseUrl, mode, customSelector) {
     });
     data.custom = results;
   }
-
-  data.stats = {
-    headings: data.headings?.length || 0,
-    paragraphs: data.paragraphs?.length || 0,
-    links: data.links?.length || 0,
-    images: data.images?.length || 0,
-    tables: data.tables?.length || 0,
-    custom: data.custom?.length || 0
-  };
+  data.stats = { headings: data.headings?.length || 0, paragraphs: data.paragraphs?.length || 0, links: data.links?.length || 0, images: data.images?.length || 0, tables: data.tables?.length || 0, custom: data.custom?.length || 0 };
   return data;
 }
 
-// ============================================================
 // 7. EXPORTER & HANDLER
-// ============================================================
 function buildJsFile(data, options) {
   const name = options.variableName && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(options.variableName) ? options.variableName : 'scrapedData';
   const header = `// Generated by FASTSCRAPE\n// Source URL: ${(data.url||'').replace(/\r?\n/g,' ')}\n// Scraped at: ${data.scrapedAt||''}\n// Mode: ${options.mode||'all'}\n\n`;
@@ -362,14 +292,8 @@ function buildFilename(url, mode) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   return `${host}_${String(mode||'all').replace(/[^a-z0-9]/gi,'')}_${ts}.js`;
 }
-
 const VALID_MODES = new Set(['all','text','links','images','tables','custom']);
-
-function sendJson(res, status, body) {
-  res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
-}
-
+function sendJson(res, status, body) { res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(body)); }
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -378,36 +302,24 @@ function readJson(req) {
     req.on('error', reject);
   });
 }
-
 function normalizeError(err) {
   if (!err) return 'Terjadi kesalahan.';
   if (typeof err === 'string') return err;
   if (typeof err.message === 'string') return err.message;
   try { return JSON.stringify(err); } catch { return 'Terjadi kesalahan.'; }
 }
-
 module.exports = async function handler(req, res) {
-  if (req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, proxiesLoaded: getProxyPool().size, message: 'Endpoint aktif. Gunakan POST.' });
-  }
+  if (req.method === 'GET') return sendJson(res, 200, { ok: true, proxiesLoaded: getProxyPool().size, message: 'Endpoint aktif.' });
   if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'Method tidak diizinkan' });
-
   const limit = rateLimit(req);
-  if (!limit.allowed) {
-    res.setHeader('Retry-After', Math.ceil((limit.resetAt - Date.now()) / 1000));
-    return sendJson(res, 429, { ok: false, error: 'Terlalu banyak permintaan' });
-  }
-
+  if (!limit.allowed) { res.setHeader('Retry-After', Math.ceil((limit.resetAt - Date.now()) / 1000)); return sendJson(res, 429, { ok: false, error: 'Terlalu banyak permintaan' }); }
   let body;
   try { body = await readJson(req); } catch (err) { return sendJson(res, 400, { ok: false, error: normalizeError(err) }); }
-
   const { url, mode = 'all', customSelector = '', variableName = 'scrapedData' } = body || {};
   if (!VALID_MODES.has(mode)) return sendJson(res, 400, { ok: false, error: 'Mode tidak valid' });
-  if (mode === 'custom' && !customSelector) return sendJson(res, 400, { ok: false, error: 'customSelector wajib untuk mode custom' });
-
+  if (mode === 'custom' && !customSelector) return sendJson(res, 400, { ok: false, error: 'customSelector wajib' });
   const v = validateUrl(url);
   if (!v.valid) return sendJson(res, 400, { ok: false, error: v.reason });
-
   try {
     const f = await fetchWithProxyRotation(v.url);
     const parsed = parseHtml(f.html, f.finalUrl || v.url, mode, customSelector);
@@ -415,24 +327,15 @@ module.exports = async function handler(req, res) {
     parsed.httpStatus = f.status;
     parsed.finalUrl = f.finalUrl;
     parsed.attempts = f.attempts;
-
     const wantsJson = req.query?.format === 'json' || req.headers.accept?.includes('application/json');
     if (wantsJson) return sendJson(res, 200, { ok: true, data: parsed });
-
     const js = buildJsFile(parsed, { mode, variableName });
     const fn = buildFilename(v.url, mode);
     res.status(200);
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fn}"`);
-    res.setHeader('X-Scrape-Proxy', String(f.proxyUsed || 'direct'));
-    res.setHeader('X-Scrape-Status', String(f.status));
     return res.end(js);
   } catch (err) {
-    return sendJson(res, 502, {
-      ok: false,
-      error: normalizeError(err),
-      code: normalizeError(err.code || 'SCRAPE_FAILED'),
-      attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : []
-    });
+    return sendJson(res, 502, { ok: false, error: normalizeError(err), code: normalizeError(err.code || 'SCRAPE_FAILED'), attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({ ...a, error: a.error ? normalizeError(a.error) : null })) : [] });
   }
 };
