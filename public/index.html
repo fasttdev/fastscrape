@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#d6dfeb" />
   <meta name="description" content="FASTSCRAPE - scrape website, simpan hasil sebagai file JavaScript." />
   <title>FASTSCRAPE</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="bg-blob bg-blob-1"></div>
@@ -22,9 +22,9 @@
           <p>Scrape website, simpan sebagai .js</p>
         </div>
       </div>
-      <div id="proxyStatus" class="pill pill-loading">
+      <div id="netStatus" class="pill pill-loading">
         <span class="pill-dot"></span>
-        <span id="proxyStatusText">Proxy: memuat</span>
+        <span id="netStatusText">Cek koneksi...</span>
       </div>
     </header>
 
@@ -32,7 +32,7 @@
       <section class="panel glass-clay">
         <div class="panel-header">
           <h2>Konfigurasi</h2>
-          <span class="panel-badge">Scraper</span>
+          <span class="panel-badge">Static</span>
         </div>
 
         <form id="scrapeForm" class="form" autocomplete="off" novalidate>
@@ -90,11 +90,11 @@
       </section>
 
       <footer class="app-footer">
-        <p>Hasil diunduh sebagai file <code>.js</code> siap pakai.</p>
+        <p>Mode static: pakai CORS proxy publik. <code>.js</code> siap pakai.</p>
       </footer>
     </main>
   </div>
 
-  <script src="/app.js" defer></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
