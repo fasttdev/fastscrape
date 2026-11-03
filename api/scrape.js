@@ -21,6 +21,15 @@ function readJson(req) {
   });
 }
 
+// FIX: pastikan semua pesan error jadi string
+function normalizeError(err) {
+  if (!err) return 'Terjadi kesalahan.';
+  if (typeof err === 'string') return err;
+  if (typeof err.message === 'string') return err.message;
+  if (typeof err.reason === 'string') return err.reason;
+  try { return JSON.stringify(err); } catch { return 'Terjadi kesalahan.'; }
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
     return sendJson(res, 200, { ok: true, message: 'Endpoint scrape aktif. Gunakan POST.', proxiesLoaded: getProxyPool().size });
@@ -34,14 +43,14 @@ module.exports = async function handler(req, res) {
   }
 
   let body;
-  try { body = await readJson(req); } catch (err) { return sendJson(res, 400, { ok: false, error: err.message }); }
+  try { body = await readJson(req); } catch (err) { return sendJson(res, 400, { ok: false, error: normalizeError(err) }); }
 
   const { url, mode = 'all', customSelector = '', variableName = 'scrapedData' } = body || {};
   if (!VALID_MODES.has(mode)) return sendJson(res, 400, { ok: false, error: 'Mode tidak valid' });
   if (mode === 'custom' && !customSelector) return sendJson(res, 400, { ok: false, error: 'customSelector wajib untuk mode custom' });
 
   const v = validateUrl(url);
-  if (!v.valid) return sendJson(res, 400, { ok: false, error: v.reason });
+  if (!v.valid) return sendJson(res, 400, { ok: false, error: normalizeError(v.reason) });
 
   try {
     const f = await fetchWithProxyRotation(v.url);
@@ -63,6 +72,14 @@ module.exports = async function handler(req, res) {
     res.setHeader('X-Scrape-Status', String(f.status));
     return res.end(js);
   } catch (err) {
-    return sendJson(res, 502, { ok: false, error: err.message || 'Gagal scrape', code: err.code || 'SCRAPE_FAILED', attempts: err.attempts || [] });
+    return sendJson(res, 502, {
+      ok: false,
+      error: normalizeError(err),          // <-- FIX: dijamin string
+      code: normalizeError(err.code || 'SCRAPE_FAILED'),
+      attempts: Array.isArray(err.attempts) ? err.attempts.map(a => ({
+        ...a,
+        error: a.error ? normalizeError(a.error) : null
+      })) : []
+    });
   }
 };
