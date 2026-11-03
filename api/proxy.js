@@ -57,11 +57,13 @@ const HARDCODED_PROXIES = `
 const BLOCKED_HOSTS = new Set(['localhost','127.0.0.1','0.0.0.0','::1','[::1]','metadata.google.internal','169.254.169.254']);
 const BLOCKED_PROTOCOLS = new Set(['file:','ftp:','gopher:','data:','javascript:','mailto:']);
 const PRIVATE_IP_REGEX = [/^10\./,/^127\./,/^169\.254\./,/^172\.(1[6-9]|2[0-9]|3[01])\./,/^192\.168\./,/^0\./,/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,/^198\.18\./,/^198\.19\./,/^::1$/,/^fc00:/i,/^fd00:/i,/^fe80:/i];
+
 function isPrivateIp(host) {
   const h = host.replace(/^\[|\]$/g, '');
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h) && !h.includes(':')) return false;
   return PRIVATE_IP_REGEX.some(rx => rx.test(h));
 }
+
 function validateUrl(input) {
   if (!input || typeof input !== 'string') return { valid: false, reason: 'URL kosong' };
   let parsed;
@@ -74,11 +76,12 @@ function validateUrl(input) {
   return { valid: true, url: parsed.toString() };
 }
 
-// Proxy pool + sticky session
+// ============ PROXY POOL ============
 const PROXY_FAIL_THRESHOLD = 3;
 const PROXY_COOLDOWN_MS = 60000;
-const SESSION_TTL_MS = 5 * 60 * 1000;
-const _sessionProxy = new Map(); // sessionId -> { proxyKey, proxyUrl, expiresAt }
+const SESSION_TTL_MS = 10 * 60 * 1000;
+
+const _sessionProxy = new Map();
 
 class ProxyPool {
   constructor() { this.proxies = []; this.cursor = 0; this.state = new Map(); this._load(); }
@@ -132,15 +135,67 @@ function getSessionProxy(sessionId) {
   }
   const p = pool.next();
   if (p) {
-    _sessionProxy.set(sessionId, { proxyKey: p.key, proxyUrl: p.url, expiresAt: now + SESSION_TTL_MS });
+    _sessionProxy.set(sessionId, { proxyKey: p.key, expiresAt: now + SESSION_TTL_MS });
   }
-  // Cleanup expired
   if (_sessionProxy.size > 500) {
     for (const [k, v] of _sessionProxy) if (v.expiresAt <= now) _sessionProxy.delete(k);
   }
   return p;
 }
 
+// ============ COOKIE JAR PER SESSION ============
+// Pindown set cookie (session, cf_clearance, dll.) di response /api/token.
+// Cookie ini WAJIB dibawa ke /action dan /Getfetch. Jadi simpan di backend.
+const _cookieJars = new Map(); // sessionId -> Map<name, value>
+
+function getJar(sessionId) {
+  if (!sessionId) return null;
+  const now = Date.now();
+  let jar = _cookieJars.get(sessionId);
+  if (!jar) {
+    jar = { cookies: new Map(), expiresAt: now + SESSION_TTL_MS };
+    _cookieJars.set(sessionId, jar);
+  } else {
+    jar.expiresAt = now + SESSION_TTL_MS;
+  }
+  // cleanup
+  if (_cookieJars.size > 500) {
+    for (const [k, v] of _cookieJars) if (v.expiresAt <= now) _cookieJars.delete(k);
+  }
+  return jar;
+}
+
+function storeCookies(sessionId, setCookieHeaders) {
+  if (!sessionId || !setCookieHeaders) return;
+  const jar = getJar(sessionId);
+  if (!jar) return;
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'string') continue;
+    // Format: name=value; Attr=...; Attr=...
+    const firstSemi = raw.indexOf(';');
+    const nv = (firstSemi === -1 ? raw : raw.slice(0, firstSemi)).trim();
+    const eq = nv.indexOf('=');
+    if (eq <= 0) continue;
+    const name = nv.slice(0, eq).trim();
+    const value = nv.slice(eq + 1).trim();
+    if (!name) continue;
+    if (value === '' || /expires=Thu, 01 Jan 1970/i.test(raw)) {
+      jar.cookies.delete(name);
+    } else {
+      jar.cookies.set(name, value);
+    }
+  }
+}
+
+function buildCookieHeader(sessionId) {
+  if (!sessionId) return '';
+  const jar = _cookieJars.get(sessionId);
+  if (!jar || jar.cookies.size === 0) return '';
+  return Array.from(jar.cookies.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+// ============ HANDLER ============
 function sendJson(res, status, body) {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(body));
@@ -171,15 +226,16 @@ module.exports = async function handler(req, res) {
   const cleanHeaders = {};
   Object.keys(headers).forEach(k => {
     const lk = k.toLowerCase();
-    if (['host', 'content-length', 'connection', 'content-encoding', 'accept-encoding'].includes(lk)) return;
+    if (['host', 'content-length', 'connection', 'content-encoding', 'accept-encoding', 'cookie'].includes(lk)) return;
     cleanHeaders[k] = headers[k];
   });
-  // Forward cookies from the browser request to our proxy endpoint
-  if (req.headers.cookie) cleanHeaders['Cookie'] = req.headers.cookie;
   cleanHeaders['Accept-Encoding'] = 'gzip, deflate, br';
   cleanHeaders['User-Agent'] = cleanHeaders['User-Agent'] || cleanHeaders['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-  // Sticky proxy per session
+  // Cookie jar (BUKAN cookie browser)
+  const cookieHeader = buildCookieHeader(sessionId);
+  if (cookieHeader) cleanHeaders['Cookie'] = cookieHeader;
+
   const proxy = getSessionProxy(sessionId);
 
   const cfg = {
@@ -205,6 +261,10 @@ module.exports = async function handler(req, res) {
     if (proxy && r.status >= 200 && r.status < 400) getPool().markSuccess(proxy);
     else if (proxy) getPool().markFailure(proxy);
 
+    // Simpan cookie dari response target untuk request berikutnya
+    const setCookie = r.headers['set-cookie'];
+    if (setCookie) storeCookies(sessionId, setCookie);
+
     const contentType = String(r.headers['content-type'] || '').toLowerCase();
     const isText = /json|text|xml|javascript|html|x-www-form-urlencoded/.test(contentType);
     const buf = Buffer.from(r.data);
@@ -216,21 +276,9 @@ module.exports = async function handler(req, res) {
     const outHeaders = {};
     Object.keys(r.headers).forEach(k => {
       const lk = k.toLowerCase();
-      if (['content-length', 'transfer-encoding', 'connection', 'content-encoding', 'content-security-policy'].includes(lk)) return;
+      if (['content-length', 'transfer-encoding', 'connection', 'content-encoding', 'content-security-policy', 'set-cookie'].includes(lk)) return;
       outHeaders[k] = r.headers[k];
     });
-
-    // Pass Set-Cookie headers back to the browser (as our domain's cookies)
-    const setCookie = r.headers['set-cookie'];
-    if (setCookie) {
-      // Rewrite domain to our own so browser stores them, remove Secure in dev if needed
-      const rewritten = (Array.isArray(setCookie) ? setCookie : [setCookie]).map(c => {
-        return c
-          .replace(/;\s*Domain=[^;]+/gi, '')
-          .replace(/;\s*Secure/gi, '');
-      });
-      res.setHeader('Set-Cookie', rewritten);
-    }
 
     return sendJson(res, 200, {
       ok: true,
