@@ -1,0 +1,2 @@
+# fastscrape
+MADE BY FASTDEV
